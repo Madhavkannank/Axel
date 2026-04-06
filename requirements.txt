@@ -1,0 +1,14 @@
+groq
+pytesseract
+pillow
+piexif
+pdfplumber
+pikepdf
+python-docx
+watchdog
+sentence-transformers
+numpy
+scikit-learn
+PyQt5
+PyQt5-sip
+QtAwesome
