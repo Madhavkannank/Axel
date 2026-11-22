@@ -1,6 +1,7 @@
 pub mod code;
 pub mod filter;
 pub mod keywords;
+pub mod privacy;
 pub mod rules;
 pub mod tfidf;
 
@@ -10,6 +11,7 @@ pub use filter::{
     should_skip_file,
 };
 pub use keywords::KeywordExtractor;
+pub use privacy::{is_high_risk_identity_document, redact_sensitive_pii, RedactionSummary};
 pub use rules::RuleClassifier;
 pub use tfidf::TfidfEngine;
 

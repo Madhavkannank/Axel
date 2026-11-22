@@ -167,32 +167,47 @@ async fn run_watch(target_dir: &Path, config: &Config) -> Result<(), Box<dyn std
                 .to_string();
 
             if let Some(hash) = DocumentIndex::compute_file_hash(&path) {
-                if index.find_by_hash(&hash).is_none() {
-                    println!(
-                        "\n[Watcher] Detected new document: {}",
-                        file_name.cyan().bold()
-                    );
-
-                    let (text, _) = extract_text(&path);
-                    let ai_res = ai.analyze_document(&text, &file_name, None).await;
-
-                    println!("  Category: {}", ai_res.category.green().bold());
-                    println!("  Keywords: {}", ai_res.keywords.join(", ").dimmed());
-
-                    let item = IndexItem {
-                        file: file_name,
-                        category: ai_res.category,
-                        keywords: ai_res.keywords,
-                        symbols: Vec::new(),
-                        path: path.display().to_string(),
-                        hash,
-                        indexed_at: Some(chrono::Utc::now().to_rfc3339()),
-                    };
-
-                    index.upsert(item);
-                    if let Err(e) = index.save() {
-                        eprintln!("[Error] Failed to save index: {e}");
+                let path_str = path.display().to_string();
+                if let Some(existing) = index.find_by_hash(&hash) {
+                    if !existing.physical_paths.contains(&path_str) {
+                        println!(
+                            "\n[Watcher] Duplicate download detected: {} -> matches existing canonical: {}",
+                            file_name.yellow().bold(),
+                            existing.file.cyan().bold()
+                        );
+                        let mut dup_item = existing.clone();
+                        dup_item.path = path_str;
+                        index.upsert(dup_item);
+                        if let Err(e) = index.save() {
+                            eprintln!("[Error] Failed to save index: {e}");
+                        }
                     }
+                    continue;
+                }
+
+                println!(
+                    "\n[Watcher] Detected new document: {}",
+                    file_name.cyan().bold()
+                );
+
+                let (text, _) = extract_text(&path);
+                let ai_res = ai.analyze_document(&text, &file_name, None).await;
+
+                println!("  Category: {}", ai_res.category.green().bold());
+                println!("  Keywords: {}", ai_res.keywords.join(", ").dimmed());
+
+                let item = IndexItem::new(
+                    file_name,
+                    ai_res.category,
+                    ai_res.keywords,
+                    Vec::new(),
+                    path.display().to_string(),
+                    hash,
+                );
+
+                index.upsert(item);
+                if let Err(e) = index.save() {
+                    eprintln!("[Error] Failed to save index: {e}");
                 }
             }
         }

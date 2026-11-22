@@ -174,6 +174,7 @@ async fn test_memory_budget_under_10mb() {
             path: format!("/workspace/scripts/script_{i}.py"),
             hash: format!("hash_{i}"),
             indexed_at: None,
+            ..Default::default()
         });
     }
 

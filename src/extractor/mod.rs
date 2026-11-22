@@ -1,6 +1,7 @@
 pub mod docx;
 pub mod ocr;
 pub mod pdf;
+pub mod video;
 
 use std::fs::File;
 use std::io::Read;
@@ -11,6 +12,7 @@ pub enum FileType {
     Pdf,
     Docx,
     Image,
+    Video,
     Text,
     Unsupported,
 }
@@ -21,6 +23,7 @@ impl FileType {
             FileType::Pdf => "pdf",
             FileType::Docx => "docx",
             FileType::Image => "image",
+            FileType::Video => "video",
             FileType::Text => "text",
             FileType::Unsupported => "unsupported",
         }
@@ -38,6 +41,7 @@ pub fn detect_file_type<P: AsRef<Path>>(path: P) -> FileType {
         "pdf" => FileType::Pdf,
         "docx" => FileType::Docx,
         "jpg" | "jpeg" | "png" | "tiff" | "tif" | "bmp" | "webp" | "gif" => FileType::Image,
+        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "m4v" => FileType::Video,
         "txt" | "md" | "markdown" | "csv" | "tsv" | "json" | "jsonl" | "yaml" | "yml"
         | "toml" | "xml" | "html" | "htm" | "css" | "scss" | "js" | "jsx" | "ts" | "tsx"
         | "py" | "rs" | "go" | "java" | "c" | "cpp" | "cc" | "h" | "hpp" | "sh" | "bash"
@@ -61,6 +65,7 @@ pub fn extract_raw_text<P: AsRef<Path>>(path: P) -> (String, FileType) {
         FileType::Pdf => pdf::extract_text(path).unwrap_or_default(),
         FileType::Docx => docx::extract_text(path).unwrap_or_default(),
         FileType::Image => ocr::extract_text(path).unwrap_or_default(),
+        FileType::Video => video::extract_video_text(path).0,
         FileType::Text => read_text_capped(path, 256 * 1024),
         FileType::Unsupported => String::new(),
     };

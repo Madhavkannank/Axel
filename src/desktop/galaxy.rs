@@ -1408,6 +1408,7 @@ mod tests {
                 path: "documents/invoice_1.txt".into(),
                 hash: "h1".into(),
                 indexed_at: None,
+                ..Default::default()
             },
             IndexItem {
                 file: "medical_1.txt".into(),
@@ -1417,6 +1418,7 @@ mod tests {
                 path: "documents/medical_1.txt".into(),
                 hash: "h2".into(),
                 indexed_at: None,
+                ..Default::default()
             },
             IndexItem {
                 file: "legal_1.txt".into(),
@@ -1426,6 +1428,7 @@ mod tests {
                 path: "documents/legal_1.txt".into(),
                 hash: "h3".into(),
                 indexed_at: None,
+                ..Default::default()
             },
             IndexItem {
                 file: "tech_1.txt".into(),
@@ -1435,6 +1438,7 @@ mod tests {
                 path: "documents/tech_1.txt".into(),
                 hash: "h4".into(),
                 indexed_at: None,
+                ..Default::default()
             },
             IndexItem {
                 file: "academic_1.txt".into(),
@@ -1444,6 +1448,7 @@ mod tests {
                 path: "documents/academic_1.txt".into(),
                 hash: "h5".into(),
                 indexed_at: None,
+                ..Default::default()
             },
         ];
 

@@ -487,15 +487,14 @@ pub async fn analyze_and_build_item_with_tfidf(
 
         let (ai_res, symbols) = ai.analyze_code_script(&raw_text, &file_name, &ext, &tfidf_kws).await;
 
-        Some(IndexItem {
-            file: file_name,
-            category: ai_res.category,
-            keywords: ai_res.keywords,
-            symbols: symbols.symbols,
-            path: resolved.display().to_string(),
+        Some(IndexItem::new(
+            file_name,
+            ai_res.category,
+            ai_res.keywords,
+            symbols.symbols,
+            resolved.display().to_string(),
             hash,
-            indexed_at: Some(chrono::Utc::now().to_rfc3339()),
-        })
+        ))
     } else {
         let mut tfidf_kws = Vec::new();
         if let Some(engine) = tfidf.as_deref_mut() {
@@ -506,15 +505,14 @@ pub async fn analyze_and_build_item_with_tfidf(
         let preprocessed = preprocess_text(&raw_text);
         let ai_res = ai.analyze_document(&preprocessed, &file_name, Some(&tfidf_kws)).await;
 
-        Some(IndexItem {
-            file: file_name,
-            category: ai_res.category,
-            keywords: ai_res.keywords,
-            symbols: Vec::new(),
-            path: resolved.display().to_string(),
+        Some(IndexItem::new(
+            file_name,
+            ai_res.category,
+            ai_res.keywords,
+            Vec::new(),
+            resolved.display().to_string(),
             hash,
-            indexed_at: Some(chrono::Utc::now().to_rfc3339()),
-        })
+        ))
     }
 }
 
@@ -719,6 +717,7 @@ mod tests {
                 path: "documents/discharge.txt".to_string(),
                 hash: "h1".to_string(),
                 indexed_at: Some("2026-11-22T10:00:00Z".to_string()),
+                ..Default::default()
             },
             IndexItem {
                 file: "paper.txt".to_string(),
@@ -728,6 +727,7 @@ mod tests {
                 path: "documents/paper.txt".to_string(),
                 hash: "h2".to_string(),
                 indexed_at: Some("2026-11-22T11:00:00Z".to_string()),
+                ..Default::default()
             },
         ];
 
@@ -751,6 +751,7 @@ mod tests {
                 path: "documents/invoice_q1.txt".to_string(),
                 hash: "h1".to_string(),
                 indexed_at: None,
+                ..Default::default()
             },
             IndexItem {
                 file: "vendor_contract.txt".to_string(),
@@ -760,6 +761,7 @@ mod tests {
                 path: "documents/vendor_contract.txt".to_string(),
                 hash: "h2".to_string(),
                 indexed_at: None,
+                ..Default::default()
             },
         ];
 

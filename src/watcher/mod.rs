@@ -97,24 +97,15 @@ impl FolderWatcher {
 
         for comp in path.components() {
             if let Some(name) = comp.as_os_str().to_str() {
-                if name.starts_with('.')
-                    || matches!(
-                        name,
-                        "target" | "node_modules" | "__pycache__" | ".git" | ".venv" | "venv"
-                    )
-                {
+                if crate::classifier::filter::should_skip_directory(name) {
                     return false;
                 }
             }
         }
 
-        if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-            if file_name.starts_with('.')
-                || file_name.starts_with('~')
-                || file_name.starts_with("updated_")
-            {
-                return false;
-            }
+        let file_size = path.metadata().ok().map(|m| m.len());
+        if crate::classifier::filter::should_skip_file(path, file_size) {
+            return false;
         }
 
         detect_file_type(path) != FileType::Unsupported

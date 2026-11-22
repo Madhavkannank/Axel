@@ -59,6 +59,9 @@ impl GroqClient {
     }
 
     pub async fn categorize(&self, text: &str, suggested_cat: Option<&str>, suggested_kws: &[String]) -> Option<CategoryResult> {
+        let (sanitized_text, _) = crate::classifier::redact_sensitive_pii(text);
+        let text = sanitized_text.as_str();
+
         let ml_context = if let Some(cat) = suggested_cat {
             format!(
                 "\nMachine Learning suggestion:\nSuggested Category: {}\nSuggested Keywords: {}\nUse these suggestions if accurate, otherwise refine.\n",

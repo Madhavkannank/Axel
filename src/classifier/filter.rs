@@ -109,9 +109,13 @@ const SKIP_FILE_EXTENSIONS: &[&str] = &[
     "jar", "war", "apk", "deb", "rpm", "cab", "elf",
     // Multipart archive fragments
     "part1.rar", "part01.rar", "r00", "r01", "7z", "rar",
-    // Heavy media and 3D meshes (not document text or code)
-    "mp4", "mkv", "avi", "mov", "flv", "wmv", "webm", "mp3", "wav", "flac", "ogg", "m4a",
-    "aac", "fbx", "blend", "stl", "gltf", "glb", "unitypackage", "torrent",
+    // Audio and 3D meshes (not document text, code, or video)
+    "mp3", "wav", "flac", "ogg", "m4a", "aac", "fbx", "blend", "stl", "gltf", "glb",
+    "unitypackage", "torrent",
+];
+
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "flv", "wmv", "webm", "m4v",
 ];
 
 /// Supported document extensions
@@ -190,9 +194,10 @@ pub fn should_skip_file(path: &Path, file_size: Option<u64>) -> bool {
         return true;
     }
 
-    // File size filter: skip any single file > 10MB to guarantee < 10MB RSS memory ceiling
+    // File size filter: skip document/code files > 10MB to guarantee < 10MB RSS memory ceiling.
+    // Long video files (> 10MB) are permitted because they are probed via streaming container headers (< 1MB RAM)
     if let Some(size) = file_size {
-        if size > 10 * 1024 * 1024 {
+        if !is_video_extension(&ext) && size > 10 * 1024 * 1024 {
             return true;
         }
         // Text / script files larger than 1MB are almost always generated dumps or logs
@@ -202,11 +207,19 @@ pub fn should_skip_file(path: &Path, file_size: Option<u64>) -> bool {
     }
 
     // Check if it's a known processable extension
-    if !is_doc_extension(&ext) && !is_script_extension(&ext) && !is_image_extension(&ext) {
+    if !is_doc_extension(&ext)
+        && !is_script_extension(&ext)
+        && !is_image_extension(&ext)
+        && !is_video_extension(&ext)
+    {
         return true;
     }
 
     false
+}
+
+pub fn is_video_extension(ext: &str) -> bool {
+    VIDEO_EXTENSIONS.contains(&ext)
 }
 
 pub fn is_doc_extension(ext: &str) -> bool {

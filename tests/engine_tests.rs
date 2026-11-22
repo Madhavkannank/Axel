@@ -42,6 +42,8 @@ fn test_file_type_detection() {
     assert_eq!(detect_file_type("report.pdf"), FileType::Pdf);
     assert_eq!(detect_file_type("contract.docx"), FileType::Docx);
     assert_eq!(detect_file_type("photo.jpeg"), FileType::Image);
+    assert_eq!(detect_file_type("lecture_calculus.mp4"), FileType::Video);
+    assert_eq!(detect_file_type("presentation.mkv"), FileType::Video);
     assert_eq!(detect_file_type("notes.txt"), FileType::Text);
     assert_eq!(detect_file_type("data.json"), FileType::Text);
     assert_eq!(detect_file_type("sheet.csv"), FileType::Text);
@@ -95,6 +97,7 @@ fn test_document_index_search_hybrid_blending() {
         path: "/docs/tax_invoice_2026.pdf".to_string(),
         hash: "hash1".to_string(),
         indexed_at: Some("2026-11-22T00:00:00Z".to_string()),
+        ..Default::default()
     };
 
     let item2 = IndexItem {
@@ -105,6 +108,7 @@ fn test_document_index_search_hybrid_blending() {
         path: "/docs/invoyce_statement.pdf".to_string(),
         hash: "hash2".to_string(),
         indexed_at: Some("2026-11-22T00:00:00Z".to_string()),
+        ..Default::default()
     };
 
     index.upsert(item1);
@@ -145,6 +149,7 @@ fn test_document_index_deduplication() {
         path: "/docs/contract.docx".to_string(),
         hash: "contracthash123".to_string(),
         indexed_at: Some("2026-11-22T00:00:00Z".to_string()),
+        ..Default::default()
     };
 
     index.upsert(item.clone());
@@ -171,6 +176,7 @@ fn test_document_index_remove_by_hash() {
         path: "/docs/temp_note.txt".to_string(),
         hash: "removehash999".to_string(),
         indexed_at: Some("2026-11-22T00:00:00Z".to_string()),
+        ..Default::default()
     };
 
     index.upsert(item);
@@ -180,4 +186,62 @@ fn test_document_index_remove_by_hash() {
     assert!(removed.is_some());
     assert_eq!(index.count(), 0);
     assert!(index.remove_by_hash("missing").is_none());
+}
+
+#[test]
+fn test_video_sidecar_subtitle_extraction() {
+    let temp_dir = std::env::temp_dir().join(format!("axel_video_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_file = temp_dir.join("mit_calculus_lecture_01.mp4");
+    let srt_file = temp_dir.join("mit_calculus_lecture_01.srt");
+
+    // Create a dummy video file (empty or tiny)
+    std::fs::write(&video_file, b"dummy video container header").unwrap();
+
+    // Create sidecar .srt
+    let srt_content = r#"
+1
+00:00:01,000 --> 00:00:05,000
+Welcome to Calculus. Today we introduce derivatives and limits.
+
+2
+00:00:06,000 --> 00:00:10,000
+The rate of change of a function is given by the derivative.
+"#;
+    std::fs::write(&srt_file, srt_content).unwrap();
+
+    let (text, file_type) = axel::extractor::extract_text(&video_file);
+    assert_eq!(file_type, FileType::Video);
+    assert!(text.contains("Welcome to Calculus"));
+    assert!(text.contains("derivatives and limits"));
+    assert!(!text.contains("-->"));
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_watcher_filtering_and_duplicate_safety() {
+    use axel::classifier::filter::{should_skip_directory, should_skip_file};
+    use std::path::Path;
+
+    // 1. Directories that watcher must automatically ignore
+    assert!(should_skip_directory("SteamLibrary"));
+    assert!(should_skip_directory("steamapps"));
+    assert!(should_skip_directory("node_modules"));
+    assert!(should_skip_directory("__pycache__"));
+    assert!(should_skip_directory(".venv"));
+    assert!(should_skip_directory("mods"));
+
+    // 2. Binary and game files that watcher must ignore
+    assert!(should_skip_file(Path::new("game.pak"), Some(1024)));
+    assert!(should_skip_file(Path::new("setup.iso"), Some(1024)));
+    assert!(should_skip_file(Path::new("bundle.min.js"), Some(1024)));
+    assert!(should_skip_file(Path::new("package-lock.json"), Some(1024)));
+
+    // 3. Normal user files that watcher MUST process
+    assert!(!should_skip_file(Path::new("calculus_notes.pdf"), Some(1024)));
+    assert!(!should_skip_file(Path::new("1.py"), Some(1024)));
+    assert!(!should_skip_file(Path::new("lecture.mp4"), Some(1024)));
 }

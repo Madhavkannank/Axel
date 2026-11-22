@@ -1,7 +1,8 @@
 pub mod groq;
 
 use crate::classifier::{
-    extract_code_symbols, CodeSymbols, KeywordExtractor, RuleClassifier,
+    extract_code_symbols, is_high_risk_identity_document, redact_sensitive_pii, CodeSymbols,
+    KeywordExtractor, RuleClassifier,
 };
 use crate::config::Config;
 pub use groq::{CategoryResult, GroqClient};
@@ -57,23 +58,30 @@ impl AiEngine {
             }
         }
 
-        // Step 2: If Groq is configured, attempt LLM reasoning with model fallbacks
-        if let Some(ref client) = self.groq {
-            if !text.trim().is_empty() {
-                if let Some(mut llm_res) = client.categorize(text, Some(&rule_cat), &rule_kws).await {
-                    llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, text, self.max_keywords);
-                    return llm_res;
-                }
-            } else {
-                let context_prompt = format!("File name: {file_name}. Infer category and up to 5 keywords.");
-                if let Some(mut llm_res) = client.categorize(&context_prompt, Some(&rule_cat), &rule_kws).await {
-                    llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, file_name, self.max_keywords);
-                    return llm_res;
+        // Security & Privacy Shield: If document is a high-risk government identity document
+        // (Aadhaar, PAN, SSN, Passport), NEVER transmit any text to external cloud LLM APIs.
+        let is_sensitive_id = is_high_risk_identity_document(&effective_text, file_name);
+
+        // Step 2: If Groq is configured and document is NOT high-risk identity, attempt LLM reasoning with sanitized text
+        if !is_sensitive_id {
+            if let Some(ref client) = self.groq {
+                if !text.trim().is_empty() {
+                    let (sanitized_text, _) = redact_sensitive_pii(text);
+                    if let Some(mut llm_res) = client.categorize(&sanitized_text, Some(&rule_cat), &rule_kws).await {
+                        llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, text, self.max_keywords);
+                        return llm_res;
+                    }
+                } else {
+                    let context_prompt = format!("File name: {file_name}. Infer category and up to 5 keywords.");
+                    if let Some(mut llm_res) = client.categorize(&context_prompt, Some(&rule_cat), &rule_kws).await {
+                        llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, file_name, self.max_keywords);
+                        return llm_res;
+                    }
                 }
             }
         }
 
-        // Step 3: Fallback to local rule engine
+        // Step 3: Local on-device classification (100% private)
         CategoryResult {
             category: if rule_cat.is_empty() { "General".to_string() } else { rule_cat },
             keywords: self.keywords.clean_keywords(rule_kws, &effective_text, self.max_keywords),

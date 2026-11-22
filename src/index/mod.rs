@@ -5,7 +5,12 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+pub mod virtual_tree;
+pub use virtual_tree::{
+    build_virtual_tree, compute_virtual_paths, DuplicateCluster, VirtualFolder,
+};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexItem {
     pub file: String,
     pub category: String,
@@ -16,6 +21,48 @@ pub struct IndexItem {
     pub hash: String,
     #[serde(default)]
     pub indexed_at: Option<String>,
+    #[serde(default)]
+    pub virtual_paths: Vec<String>,
+    #[serde(default)]
+    pub physical_paths: Vec<String>,
+    #[serde(default)]
+    pub is_duplicate: bool,
+}
+
+impl IndexItem {
+    pub fn new(
+        file: String,
+        category: String,
+        keywords: Vec<String>,
+        symbols: Vec<String>,
+        path: String,
+        hash: String,
+    ) -> Self {
+        let ext = Path::new(&file)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let virtual_paths = compute_virtual_paths(&file, &category, &keywords, ext);
+        let physical_paths = vec![path.clone()];
+        Self {
+            file,
+            category,
+            keywords,
+            symbols,
+            path,
+            hash,
+            indexed_at: Some(chrono::Utc::now().to_rfc3339()),
+            virtual_paths,
+            physical_paths,
+            is_duplicate: false,
+        }
+    }
+}
+
+impl AsRef<IndexItem> for IndexItem {
+    fn as_ref(&self) -> &IndexItem {
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,12 +134,47 @@ impl DocumentIndex {
             .find(|item| item.path == path || resolve_workspace_path(Path::new(&item.path)) == target)
     }
 
-    pub fn upsert(&mut self, item: IndexItem) {
+    pub fn upsert(&mut self, mut item: IndexItem) {
+        let ext = Path::new(&item.file)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+
+        if item.virtual_paths.is_empty() {
+            item.virtual_paths = compute_virtual_paths(&item.file, &item.category, &item.keywords, ext);
+        }
+
+        if item.physical_paths.is_empty() {
+            item.physical_paths.push(item.path.clone());
+        }
+
         let item_resolved = resolve_workspace_path(Path::new(&item.path));
-        if let Some(pos) = self.items.iter().position(|i| {
-            i.hash == item.hash
-                || i.path == item.path
-                || resolve_workspace_path(Path::new(&i.path)) == item_resolved
+        if let Some(pos) = self.items.iter().position(|i| i.hash == item.hash) {
+            let existing = &mut self.items[pos];
+            let new_path = item.path.clone();
+
+            // Track duplicate physical download locations
+            if !existing.physical_paths.contains(&new_path) {
+                existing.physical_paths.push(new_path);
+                existing.is_duplicate = true;
+            }
+
+            // Merge virtual paths
+            for vp in item.virtual_paths {
+                if !existing.virtual_paths.contains(&vp) {
+                    existing.virtual_paths.push(vp);
+                }
+            }
+
+            // Update category and keywords if new item has richer metadata
+            if item.keywords.len() > existing.keywords.len() {
+                existing.keywords = item.keywords;
+            }
+            if !item.symbols.is_empty() && existing.symbols.is_empty() {
+                existing.symbols = item.symbols;
+            }
+        } else if let Some(pos) = self.items.iter().position(|i| {
+            i.path == item.path || resolve_workspace_path(Path::new(&i.path)) == item_resolved
         }) {
             self.items[pos] = item;
         } else {
@@ -288,6 +370,9 @@ mod tests {
                 path: "/home/maddy/Dl/10.py".to_string(),
                 hash: "h10".to_string(),
                 indexed_at: None,
+                virtual_paths: Vec::new(),
+                physical_paths: vec!["/home/maddy/Dl/10.py".to_string()],
+                is_duplicate: false,
             },
             IndexItem {
                 file: "1.py".to_string(),
@@ -297,6 +382,9 @@ mod tests {
                 path: "/home/maddy/Dl/1.py".to_string(),
                 hash: "h1".to_string(),
                 indexed_at: None,
+                virtual_paths: Vec::new(),
+                physical_paths: vec!["/home/maddy/Dl/1.py".to_string()],
+                is_duplicate: false,
             },
         ];
 
@@ -316,5 +404,59 @@ mod tests {
         let res_func = index.search("add", 5);
         assert_eq!(res_func.len(), 1);
         assert_eq!(res_func[0].item.file, "1.py");
+    }
+
+    #[test]
+    fn test_duplicate_download_tracking_and_virtual_pointers() {
+        let mut index = DocumentIndex::from_items(Vec::new());
+
+        // File downloaded first time as notes.pdf
+        let item1 = IndexItem {
+            file: "calculus_notes.pdf".to_string(),
+            category: "Academic".to_string(),
+            keywords: vec!["calculus".to_string(), "derivatives".to_string(), "notes".to_string()],
+            symbols: Vec::new(),
+            path: "/home/maddy/Downloads/calculus_notes.pdf".to_string(),
+            hash: "same_sha256_hash_123".to_string(),
+            indexed_at: None,
+            virtual_paths: Vec::new(),
+            physical_paths: Vec::new(),
+            is_duplicate: false,
+        };
+
+        index.upsert(item1);
+        assert_eq!(index.count(), 1);
+        assert!(!index.all()[0].is_duplicate);
+        assert_eq!(index.all()[0].physical_paths.len(), 1);
+
+        // Same file downloaded second time as calculus_notes (1).pdf
+        let item2 = IndexItem {
+            file: "calculus_notes (1).pdf".to_string(),
+            category: "Academic".to_string(),
+            keywords: vec!["calculus".to_string()],
+            symbols: Vec::new(),
+            path: "/home/maddy/Downloads/calculus_notes (1).pdf".to_string(),
+            hash: "same_sha256_hash_123".to_string(),
+            indexed_at: None,
+            virtual_paths: Vec::new(),
+            physical_paths: Vec::new(),
+            is_duplicate: false,
+        };
+
+        index.upsert(item2);
+
+        // Count must still be 1 (unified, no duplicate clutter!)
+        assert_eq!(index.count(), 1);
+        let canonical = &index.all()[0];
+
+        // Must be marked as duplicate with 2 physical paths tracked
+        assert!(canonical.is_duplicate);
+        assert_eq!(canonical.physical_paths.len(), 2);
+        assert!(canonical.physical_paths.contains(&"/home/maddy/Downloads/calculus_notes.pdf".to_string()));
+        assert!(canonical.physical_paths.contains(&"/home/maddy/Downloads/calculus_notes (1).pdf".to_string()));
+
+        // Virtual pointers auto-computed
+        assert!(!canonical.virtual_paths.is_empty());
+        assert!(canonical.virtual_paths[0].starts_with("Study Materials/Calculus/"));
     }
 }

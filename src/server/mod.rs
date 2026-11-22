@@ -124,11 +124,28 @@ fn spawn_background_watcher(state: AppState) {
                 None => continue,
             };
 
-            {
-                let index = state.index.lock().await;
-                if index.find_by_hash(&hash).is_some() {
-                    continue;
+            let path_str = path.display().to_string();
+            let is_duplicate_download = {
+                let mut index = state.index.lock().await;
+                if let Some(existing) = index.find_by_hash(&hash) {
+                    if !existing.physical_paths.contains(&path_str) {
+                        let mut dup_item = existing.clone();
+                        dup_item.path = path_str.clone();
+                        index.upsert(dup_item);
+                        let _ = index.save();
+                        true
+                    } else {
+                        // Already known physical path
+                        continue;
+                    }
+                } else {
+                    false
                 }
+            };
+
+            if is_duplicate_download {
+                emit_index_event(&state.events_tx, "duplicate_detected", path.file_name().and_then(|s| s.to_str()));
+                continue;
             }
 
             if let Some(item) = analyze_and_build_item(&path, &state.ai).await {
@@ -410,15 +427,14 @@ async fn upload_document(
         let (text, _) = extract_text(&target_path);
         let ai_res = state.ai.analyze_document(&text, &safe_name, None).await;
 
-        let item = IndexItem {
-            file: safe_name,
-            category: ai_res.category,
-            keywords: ai_res.keywords,
-            symbols: Vec::new(),
-            path: target_path.display().to_string(),
+        let item = IndexItem::new(
+            safe_name,
+            ai_res.category,
+            ai_res.keywords,
+            Vec::new(),
+            target_path.display().to_string(),
             hash,
-            indexed_at: Some(chrono::Utc::now().to_rfc3339()),
-        };
+        );
 
         uploaded.push(item);
     }
