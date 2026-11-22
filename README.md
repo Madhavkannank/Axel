@@ -1,124 +1,137 @@
-# AXEL: Automated Extraction & Enhanced Labeling
+# ⚡ AXEL: High-Performance Automated Document Extraction & Intelligence
 
-AXEL is an AI-powered document organization and search tool. It automatically extracts text from various file formats (Images, PDFs, Word Documents), generates intelligent categories and keywords using Large Language Models (LLMs), and embeds these tags directly into the file's metadata. Furthermore, AXEL builds a local vector index, enabling Lightning-fast keyword searches and powerful AI-driven semantic searches.
+**AXEL** is a blazing-fast, single-binary document intelligence and search system written in **Rust** (with legacy Python reference components). It automates text extraction across diverse document formats (PDFs, DOCX, Images via OCR, and Plain Text), performs zero-overhead deterministic rule classification and LLM categorization (via Groq LLaMA-3.3-70B), extracts high-signal semantic keywords, indexes documents with SHA-256 deduplication, and provides hybrid search via CLI and an embedded real-time Web UI.
 
-## 🚀 Key Features
+---
 
-- **Automated Text Extraction**: Supports Images (via Tesseract OCR), PDFs (`pdfplumber`), and DOCX files.
-- **AI-Powered Tagging**: Utilizes the Groq API (LLaMA3-70b) to intelligently categorize and extract keywords from your documents.
-- **Embedded Metadata**: Injects generated keywords directly into file attributes (EXIF for images, core properties for DOCX, metadata for PDFs) creating an `updated_` version of the file.
-- **Semantic Search**: Uses local `sentence-transformers` embeddings to allow natural language querying against your document index.
-- **Folder Watcher**: Run AXEL in watch mode to continuously monitor a dedicated `input_files` directory and tag incoming documents in real-time.
+## 🚀 Key Advantages of the Rust Engine (v0.2.0)
 
-## 📋 Prerequisites
+- **Single Binary, Zero Heavy Runtimes**: Replaces multi-gigabyte PyTorch and desktop GUI dependencies with a lean, standalone binary.
+- **Pure-Rust Cross-Platform TLS**: Built with `rustls-tls` — compiles and runs out of the box on Linux, macOS, and Windows without OpenSSL dev package headaches.
+- **Embedded Web UI & REST API**: Native asynchronous Axum HTTP server serving a modern dark-mode dashboard with real-time search, stats, and folder scanner trigger.
+- **Zero-Dependency DOCX Parsing**: Unzips and parses `word/document.xml` directly with XML entity decoding — no Microsoft Word or heavy office suite required.
+- **Pure Rust PDF Text Extraction**: Uses `pdf-extract` for lightning-fast memory-safe parsing.
+- **Intelligent OCR Engine**: Cross-platform auto-discovery of Tesseract OCR with resilient metadata and filename context fallback.
+- **Groq LLM Acceleration with Fallback**: Async HTTP client targeting `llama-3.3-70b-versatile` with automatic multi-model failover chains (`llama-3.1-8b-instant`, `mixtral-8x7b-32768`), backed by local deterministic classification.
+- **Hybrid Search Engine**: Exact substring matching, token intersection scoring, and Jaro-Winkler string distance (`strsim`) with sub-millisecond query latency.
 
-Before running AXEL, ensure you have the following installed:
-1. **Python 3.8+**
-2. **Tesseract OCR**: Required for image text extraction. You must have Tesseract installed on your system.
-   - *Windows*: Download from [UB-Mannheim](https://github.com/UB-Mannheim/tesseract/wiki).
-   - *Linux*: `sudo apt install tesseract-ocr`
-   - *Mac*: `brew install tesseract`
-3. **Groq API Key**: Needed for LLM keyword generation.
+---
 
-## 🛠️ Installation & Setup
+## 📦 Quick Start with Rust
 
-1. **Clone or Navigate to the Project Directory**
-   ```bash
-   cd axel
-   ```
-
-2. **Install Python Dependencies**
-   Install the required libraries listed in `requirements.txt`:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Configure Environment Variables (.env file)**
-   AXEL requires a `.env` file in the project root with the following keys:
-   ```
-   GROQ_API_KEY=your-api-key-here
-   MODEL_NAME=llama-3.3-70b-versatile
-   AXEL_INPUT_FOLDER=./input_files
-   AXEL_MAX_KEYWORDS=10
-   AXEL_TOP_K_RESULTS=5
-   AXEL_GROQ_FALLBACK_MODELS=llama-3.1-8b-instant,gemma2-9b-it
-   ```
-   Create a `.env` file in the project root and populate with your configuration.
-
-## 💻 Usage
-
-### CLI Mode
-Run the main pipeline using the CLI interface provided by `main.py`.
-
-#### 1. Process a Single File
-Analyze and tag a specific file manually:
+### 1. Build from Source
 ```bash
-python main.py path/to/your/document.pdf
+# Build optimized release binary
+cargo build --release
+
+# Run unit tests
+cargo test
 ```
 
-#### 2. Run the Folder Watcher
-Automatically process any new files dropped into the `input_files` directory:
+The compiled binary will be located at `./target/release/axel`.
+
+### 2. Check System Health
 ```bash
-python main.py --watch
+./target/release/axel check
 ```
 
-#### 3. Keyword Search
-Search your processed documents index by a specific keyword or category:
+### 3. Launch the Embedded Web UI & API
 ```bash
-python main.py --search "invoice"
+./target/release/axel ui
+# Or specify a custom port:
+./target/release/axel ui --port 8080
+```
+Open [http://localhost:8765](http://localhost:8765) in your browser to inspect document stats, search indexed files, and trigger folder scans.
+
+### 4. CLI Commands
+
+#### Scan and Index a Folder:
+```bash
+./target/release/axel scan ./my_documents
 ```
 
-#### 4. Semantic Search
-Perform a natural language AI search to find documents based on the meaning of your query:
+#### Process a Single Document:
 ```bash
-python main.py --semantic "tax documents from last year"
+./target/release/axel process invoice.pdf
 ```
 
-### Desktop GUI Mode
-Launch the PyQt5-based desktop file manager application:
+#### Search Documents:
 ```bash
-python launcher.py
+./target/release/axel search "consulting invoice"
 ```
 
-The AXEL Desktop Application provides:
-- **File Browser**: Navigate and select documents for processing
-- **Single-Click Processing**: Process files with visual feedback
-- **Results Display**: View category, keywords, confidence scores, and metadata
-- **Keyword Search**: Search the document index by keywords
-- **Semantic Search**: AI-powered natural language search across your documents
-- **Progress Indicators**: Real-time processing status and file count
-- **Statistics View**: Overview of processed documents and index contents
+#### Real-Time Folder Watcher:
+```bash
+./target/release/axel watch ./incoming_files
+```
 
-## 📂 Project Structure
+---
 
-- `main.py` - CLI entry point orchestrating the AXEL pipeline.
-- `config.py` - Configuration loading and environment variable management.
-- `launcher.py` - PyQt5 desktop application launcher.
-- `axel_desktop_app.py` - Main desktop application window and event orchestration.
-- `ai/` - Core AI logic:
-  - `groq_client.py`: Interacts with the Groq API for keyword extraction with model fallback.
-  - `embedding.py`: Manages local `sentence-transformers` for semantic vectors.
-- `extractor/` - Text extraction modules:
-  - `ocr.py`: Image OCR using Tesseract with LLM fallback.
-  - `pdf.py`: PDF text extraction.
-  - `docx_reader.py`: Word document parsing.
-- `metadata/` - File writers that embed generated tags directly into file metadata:
-  - `image_meta.py` (EXIF properties via `piexif`)
-  - `pdf_meta.py` (PDF properties via `pikepdf`)
-  - `docx_meta.py` (DOCX properties)
-- `ml/` - Machine Learning classification:
-  - `classifier.py`: Hybrid rule-based + ML classifier with 95.83% accuracy
-  - `keywords.py`: Keyword extraction utilities
-  - `data.json`: Processed document metadata and index
-- `ui/` - PyQt5 desktop GUI components:
-  - `file_browser.py`: File/folder navigation widget with tree view
-  - `processor.py`: Background processing thread with progress signals
-  - `results_display.py`: Results visualization and search results display
-  - `search_widget.py`: Keyword and semantic search interface
-- `utils/` - Helpers and infrastructure:
-  - `indexer.py`: Manages the local JSON index (`axel_index.json`) and performs search/similarity matching.
-  - `watcher.py`: File system watcher using `watchdog`.
-  - `file_handler.py`: Validation, type detection, and text preprocessing.
+## ⚙️ Configuration (.env)
+
+AXEL looks for an optional `.env` file in the current directory. Copy `.env.example` to customize settings:
+
+```env
+GROQ_API_KEY=gsk_your_groq_api_key_here
+MODEL_NAME=llama-3.3-70b-versatile
+AXEL_GROQ_FALLBACK_MODELS=llama-3.1-8b-instant,mixtral-8x7b-32768
+AXEL_INPUT_FOLDER=./documents
+AXEL_INDEX_PATH=axel_index.json
+AXEL_MAX_KEYWORDS=10
+AXEL_TOP_K_RESULTS=5
+AXEL_SERVER_PORT=8765
+```
+
+*Note: If `GROQ_API_KEY` is omitted, AXEL runs 100% offline using its built-in rule classifier and keyword scoring engine.*
+
+---
+
+## 🌐 REST API Endpoints
+
+When running `axel ui` or `axel serve`:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/` | `GET` | Interactive Dark-Mode Dashboard |
+| `/api/documents` | `GET` | List all indexed documents |
+| `/api/search?q={query}` | `GET` | Hybrid search indexed documents |
+| `/api/stats` | `GET` | Total documents and category breakdown |
+| `/api/scan` | `POST` | Trigger background indexing on a directory |
+
+---
+
+## 🏗️ Architecture & Project Structure
+
+```
+Axel/
+├── Cargo.toml            # Rust package specification & feature flags
+├── src/
+│   ├── main.rs           # CLI entry point (clap CLI parser)
+│   ├── lib.rs            # Core Axel library crate
+│   ├── config.rs         # Resilient environment & .env loader
+│   ├── ai/
+│   │   └── mod.rs        # Async Groq OpenAI-compatible LLM client & failover
+│   ├── classifier/
+│   │   ├── mod.rs        # Classification engine (Rule + LLM fallback)
+│   │   ├── rules.rs      # 10-category deterministic rule engine
+│   │   └── keywords.rs   # Domain-boosted keyword extractor
+│   ├── extractor/
+│   │   ├── mod.rs        # Format detection & extractor router
+│   │   ├── pdf.rs        # Pure-Rust PDF extractor
+│   │   ├── docx.rs       # Pure-Rust DOCX XML parser
+│   │   └── ocr.rs        # Cross-platform Tesseract OCR & fallback
+│   ├── index/
+│   │   └── mod.rs        # SHA-256 deduplication, atomic JSON, & hybrid search
+│   ├── watcher/
+│   │   └── mod.rs        # Native cross-platform directory watcher (notify)
+│   └── server/
+│       └── mod.rs        # Embedded Axum web server & REST API
+├── tests/
+│   └── engine_tests.rs   # Integration and unit tests
+└── legacy/ (Python)      # Original PyQt5 and PyTorch reference code
+```
+
+---
 
 ## 📜 License
-*Specify your specific license terms here.*
+MIT License

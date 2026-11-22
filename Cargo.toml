@@ -1,0 +1,36 @@
+[package]
+name = "axel"
+version = "0.2.0"
+edition = "2021"
+authors = ["Madhav Kannan K <madhavkannank@gmail.com>"]
+description = "AXEL: High-Performance Automated Document Extraction & Enhanced Labeling in Rust"
+license = "MIT"
+
+[lib]
+name = "axel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "axel"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1.40", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+notify = "6.1"
+pdf-extract = "0.7"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+dotenvy = "0.15"
+regex = "1.10"
+colored = "2.1"
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+open = "5.3"
+dirs = "5.0"
+glob = "0.3"
+strsim = "0.11"
+chrono = { version = "0.4", features = ["serde"] }
