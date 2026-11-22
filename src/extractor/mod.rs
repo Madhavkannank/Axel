@@ -2,6 +2,8 @@ pub mod docx;
 pub mod ocr;
 pub mod pdf;
 
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,13 +37,23 @@ pub fn detect_file_type<P: AsRef<Path>>(path: P) -> FileType {
     match ext.as_str() {
         "pdf" => FileType::Pdf,
         "docx" => FileType::Docx,
-        "jpg" | "jpeg" | "png" | "tiff" | "bmp" | "webp" => FileType::Image,
-        "txt" | "md" | "csv" | "json" => FileType::Text,
+        "jpg" | "jpeg" | "png" | "tiff" | "tif" | "bmp" | "webp" | "gif" => FileType::Image,
+        "txt" | "md" | "markdown" | "csv" | "tsv" | "json" | "jsonl" | "yaml" | "yml"
+        | "toml" | "xml" | "html" | "htm" | "css" | "scss" | "js" | "jsx" | "ts" | "tsx"
+        | "py" | "rs" | "go" | "java" | "c" | "cpp" | "cc" | "h" | "hpp" | "sh" | "bash"
+        | "zsh" | "sql" | "log" | "ini" | "cfg" | "conf" | "tex" | "bib" | "rtf" | "org"
+        | "rst" => FileType::Text,
         _ => FileType::Unsupported,
     }
 }
 
 pub fn extract_text<P: AsRef<Path>>(path: P) -> (String, FileType) {
+    let (raw_text, file_type) = extract_raw_text(path);
+    let preprocessed = preprocess_text(&raw_text);
+    (preprocessed, file_type)
+}
+
+pub fn extract_raw_text<P: AsRef<Path>>(path: P) -> (String, FileType) {
     let path = path.as_ref();
     let file_type = detect_file_type(path);
 
@@ -49,12 +61,23 @@ pub fn extract_text<P: AsRef<Path>>(path: P) -> (String, FileType) {
         FileType::Pdf => pdf::extract_text(path).unwrap_or_default(),
         FileType::Docx => docx::extract_text(path).unwrap_or_default(),
         FileType::Image => ocr::extract_text(path).unwrap_or_default(),
-        FileType::Text => std::fs::read_to_string(path).unwrap_or_default(),
+        FileType::Text => read_text_capped(path, 256 * 1024),
         FileType::Unsupported => String::new(),
     };
 
-    let preprocessed = preprocess_text(&raw_text);
-    (preprocessed, file_type)
+    (raw_text, file_type)
+}
+
+fn read_text_capped(path: &Path, max_bytes: usize) -> String {
+    let Ok(file) = File::open(path) else {
+        return String::new();
+    };
+    let mut buf = Vec::with_capacity(max_bytes.min(64 * 1024));
+    let mut handle = file.take(max_bytes as u64);
+    if handle.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 pub fn preprocess_text(text: &str) -> String {
@@ -63,9 +86,10 @@ pub fn preprocess_text(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
 
-    if cleaned.len() > 3000 {
-        let first = &cleaned[..1500];
-        let last = &cleaned[cleaned.len() - 1500..];
+    let char_count = cleaned.chars().count();
+    if char_count > 3000 {
+        let first: String = cleaned.chars().take(1500).collect();
+        let last: String = cleaned.chars().skip(char_count - 1500).collect();
         format!("{first} ... {last}")
     } else {
         cleaned

@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AXEL Nexus — Spatial Document Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="nexus-shell" id="nexusShell">
+    <!-- Subtle Window Title Strip -->
+    <div class="window-strip">
+      <span class="window-title">AXEL Nexus</span>
+      <span class="window-meta" id="windowMeta">Local Rust Engine</span>
+    </div>
+
+    <!-- Sleek Application Toolbar -->
+    <header class="topbar" role="banner">
+      <div class="topbar-left">
+        <button class="icon-btn" id="btnToggleRail" type="button" aria-label="Toggle navigation labels" title="Toggle navigation labels">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="4" y1="7" x2="20" y2="7"></line>
+            <line x1="4" y1="12" x2="20" y2="12"></line>
+            <line x1="4" y1="17" x2="20" y2="17"></line>
+          </svg>
+        </button>
+
+        <div class="workspace-pill-wrap">
+          <button class="workspace-pill" id="btnWorkspaceMenu" type="button" aria-haspopup="listbox" aria-expanded="false">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <span id="workspaceLabel">High-Tech File Manager</span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </button>
+          <div class="workspace-dropdown hidden" id="workspaceDropdown" role="listbox" aria-label="Filter by cluster"></div>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <button class="icon-btn" id="btnUploadTop" type="button" aria-label="Upload documents" title="Upload documents">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+        </button>
+
+        <button class="icon-btn" id="btnSettingsTop" type="button" aria-label="Engine telemetry and settings" title="Engine telemetry and settings">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace Body -->
+    <div class="workspace-body">
+      <!-- Left Navigation Rail -->
+      <nav class="left-rail" aria-label="Primary navigation">
+        <div class="rail-group">
+          <button class="rail-btn active" id="navGalaxy" type="button" data-view="galaxy" aria-label="Galaxy of Data view" title="Galaxy of Data">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"></circle>
+              <circle cx="19" cy="5" r="2"></circle>
+              <circle cx="5" cy="19" r="2"></circle>
+              <circle cx="5" cy="6" r="2"></circle>
+              <line x1="14.2" y1="9.8" x2="17.5" y2="6.5"></line>
+              <line x1="9.8" y1="14.2" x2="6.5" y2="17.5"></line>
+              <line x1="9.8" y1="9.8" x2="6.5" y2="7.5"></line>
+            </svg>
+            <span class="rail-label">Galaxy</span>
+          </button>
+
+          <button class="rail-btn" id="navSearch" type="button" aria-label="Focus semantic search" title="Semantic Search (/)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <span class="rail-label">Search</span>
+          </button>
+
+          <button class="rail-btn" id="navGrid" type="button" data-view="grid" aria-label="Cluster Grid view" title="Cluster Grid View">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+              <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+              <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+              <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+            </svg>
+            <span class="rail-label">Clusters</span>
+          </button>
+
+          <button class="rail-btn" id="navScan" type="button" aria-label="Scan watched folder" title="Scan Watched Folder">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <polyline points="1 20 1 14 7 14"></polyline>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            <span class="rail-label">Sync</span>
+          </button>
+        </div>
+
+        <div class="rail-group rail-bottom">
+          <button class="rail-btn" id="navActivity" type="button" aria-label="Toggle Activity Stream" title="Toggle Activity Stream">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+            </svg>
+            <span class="rail-label">Activity</span>
+          </button>
+
+          <button class="rail-btn" id="navResetView" type="button" aria-label="Reset Galaxy camera and filters" title="Reset View & Filters">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9"></circle>
+              <circle cx="12" cy="12" r="3"></circle>
+              <line x1="12" y1="2" x2="12" y2="5"></line>
+              <line x1="12" y1="19" x2="12" y2="22"></line>
+              <line x1="2" y1="12" x2="5" y2="12"></line>
+              <line x1="19" y1="12" x2="22" y2="12"></line>
+            </svg>
+            <span class="rail-label">Center</span>
+          </button>
+
+          <button class="rail-btn" id="navSettings" type="button" aria-label="Engine settings" title="Engine Settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+            <span class="rail-label">Engine</span>
+          </button>
+        </div>
+      </nav>
+
+      <!-- Center Stage: Galaxy Canvas + Grid View + Floating Search & Drop-Dock -->
+      <main class="stage" id="mainStage">
+        <h1 class="sr-only">AXEL Nexus Spatial Document Galaxy</h1>
+
+        <!-- Atmospheric Nebula Backdrop -->
+        <div class="cosmic-backdrop" aria-hidden="true"></div>
+
+        <!-- 60fps Interactive Galaxy Canvas -->
+        <canvas id="galaxyCanvas" aria-label="Interactive Galaxy of Data document cluster graph"></canvas>
+
+        <!-- Active Filter Pill (shown only when a filter is active) -->
+        <div class="active-filter-bar hidden" id="hudActiveFilter">
+          <span id="hudFilterText"></span>
+          <button type="button" id="btnClearFilter" aria-label="Clear active filter">&times;</button>
+        </div>
+
+        <!-- Canvas Hover Tooltip -->
+        <div class="canvas-tooltip hidden" id="canvasTooltip" role="status" aria-live="polite"></div>
+
+        <!-- Empty State Overlay (shown only when 0 documents exist) -->
+        <div class="empty-galaxy hidden" id="emptyGalaxy">
+          <div class="empty-orb" aria-hidden="true"></div>
+          <h2>Your Document Galaxy is Empty</h2>
+          <p>Drop PDF, DOCX, TXT, CSV, JSON, or image files anywhere on this canvas to extract keywords, classify clusters, and weave semantic filaments.</p>
+          <div class="empty-actions">
+            <button class="btn-primary-copper" id="btnEmptyUpload" type="button">Upload Documents</button>
+            <button class="btn-glass" id="btnEmptyScan" type="button">Scan Watched Folder</button>
+          </div>
+        </div>
+
+        <!-- Cluster Grid View (toggled via left rail) -->
+        <section class="grid-view hidden" id="gridView" aria-label="Document cluster grid">
+          <div class="grid-header">
+            <div>
+              <h2 class="grid-title">Document Clusters</h2>
+              <p class="grid-subtitle" id="gridSubtitle">Showing all indexed documents</p>
+            </div>
+            <div class="grid-controls">
+              <button class="btn-glass" id="btnBackToGalaxy" type="button">Return to Galaxy</button>
+            </div>
+          </div>
+          <div class="doc-grid" id="docGrid"></div>
+        </section>
+
+        <!-- Bottom-Center Curved Semantic Search + Visual Search Chips -->
+        <div class="search-dock" id="searchDock">
+          <div class="search-results-popover hidden" id="searchResultsPopover" role="region" aria-label="Semantic search results">
+            <div class="search-results-head">
+              <span id="searchResultsSummary">0 matches</span>
+              <button class="text-link-btn" id="btnClearSearch" type="button">Clear</button>
+            </div>
+            <div class="search-results-list" id="searchResultsList"></div>
+          </div>
+
+          <div class="curved-search-shell">
+            <div class="curved-search-inner">
+              <input
+                type="text"
+                id="semanticSearchInput"
+                class="semantic-input"
+                placeholder="Search semantic search..."
+                aria-label="Semantic document search"
+                autocomplete="off"
+              >
+              <button class="search-clear-btn hidden" id="btnInputClear" type="button" aria-label="Clear search query">&times;</button>
+              <button class="search-orb-btn" id="btnSemanticSearch" type="button" aria-label="Run semantic search">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="visual-chips" id="visualChips" role="tablist" aria-label="Visual search filters"></div>
+        </div>
+
+        <!-- Bottom-Right Dynamic Drop-Dock (3D Floating Glass Shelf) -->
+        <aside class="drop-dock" id="dropDock" aria-label="Dynamic Drop-Dock staging shelf">
+          <div class="drop-dock-shelf">
+            <button class="dock-arrow" id="btnDockPrev" type="button" aria-label="Previous staged items">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="15 18 9 12 15 6"></polyline>
+              </svg>
+            </button>
+
+            <div class="dock-cards" id="dockCards"></div>
+
+            <button class="dock-arrow" id="btnDockNext" type="button" aria-label="Next staged items">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="9 18 15 12 9 6"></polyline>
+              </svg>
+            </button>
+          </div>
+          <div class="dock-dots" id="dockDots" aria-hidden="true"></div>
+        </aside>
+
+        <!-- Full-Stage Drag Overlay -->
+        <div class="drag-overlay hidden" id="dragOverlay" aria-hidden="true">
+          <div class="drag-overlay-card">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            <h2>Drop into AXEL Nexus</h2>
+            <p>Files are extracted, classified, and woven into the Galaxy immediately.</p>
+          </div>
+        </div>
+
+        <!-- Inline Document Inspector Drawer (keeps Galaxy visible) -->
+        <aside class="inspector-drawer hidden" id="inspectorDrawer" aria-label="Document inspector">
+          <div class="inspector-header">
+            <div class="inspector-title-group">
+              <span class="inspector-cat-badge" id="modalDocCategory">Category</span>
+              <h2 id="modalDocTitle">Document Title</h2>
+              <p class="inspector-path" id="modalDocPath"></p>
+            </div>
+            <button class="icon-btn" id="btnCloseDocModal" type="button" aria-label="Close document inspector">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+
+          <div class="inspector-meta-strip" id="modalMetaStrip"></div>
+
+          <div class="inspector-section">
+            <h3 class="inspector-section-label">Semantic Keywords</h3>
+            <div class="inspector-keywords" id="modalDocKeywords"></div>
+          </div>
+
+          <div class="inspector-section inspector-preview-wrap">
+            <h3 class="inspector-section-label">Content Preview</h3>
+            <pre class="inspector-preview" id="modalDocPreview"></pre>
+          </div>
+
+          <div class="inspector-footer">
+            <div class="inspector-footer-actions">
+              <a class="btn-glass" id="btnDownloadRaw" href="#" target="_blank" rel="noopener">Open Raw File</a>
+              <button class="btn-glass" id="btnFocusInGalaxy" type="button">Focus Node</button>
+            </div>
+            <div class="inspector-delete-wrap">
+              <button class="btn-danger-glass" id="btnDeleteDoc" type="button">Remove</button>
+              <div class="delete-confirm hidden" id="deleteConfirmBar">
+                <span>Remove from index?</span>
+                <button class="btn-danger-solid" id="btnConfirmDelete" type="button">Confirm</button>
+                <button class="btn-glass" id="btnCancelDelete" type="button">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Inline Engine Telemetry Drawer -->
+        <aside class="inspector-drawer inspector-drawer-sm hidden" id="settingsDrawer" aria-label="Engine telemetry">
+          <div class="inspector-header">
+            <div class="inspector-title-group">
+              <span class="inspector-cat-badge">Rust Engine v0.2.0</span>
+              <h2>Engine Telemetry</h2>
+            </div>
+            <button class="icon-btn" id="btnCloseSettingsModal" type="button" aria-label="Close engine telemetry">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+          <div class="telemetry-grid" id="telemetryGrid"></div>
+          <div class="inspector-footer">
+            <span class="telemetry-note">Shortcuts: <code>/</code> Search &middot; <code>Esc</code> Close</span>
+            <button class="btn-primary-copper" id="btnSettingsScan" type="button">Run Full Scan</button>
+          </div>
+        </aside>
+      </main>
+
+      <!-- Right Sidebar: Activity Stream -->
+      <aside class="activity-sidebar" id="activitySidebar" aria-label="Activity streams">
+        <div class="activity-header">
+          <h2>Activity streams</h2>
+          <div class="activity-menu-wrap">
+            <button class="icon-btn" id="btnActivityMenu" type="button" aria-label="Activity stream actions" title="Activity actions">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="1"></circle>
+                <circle cx="19" cy="12" r="1"></circle>
+                <circle cx="5" cy="12" r="1"></circle>
+              </svg>
+            </button>
+            <div class="activity-dropdown hidden" id="activityDropdown">
+              <button type="button" id="btnMenuScan">Scan Watched Folder</button>
+              <button type="button" id="btnMenuUpload">Upload New Document</button>
+              <button type="button" id="btnMenuReset">Reset Active Selection</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="activity-scroll" id="activityScroll"></div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Hidden File Input for Upload / Drop-Dock -->
+  <input type="file" id="hiddenFileInput" multiple accept=".pdf,.docx,.txt,.md,.csv,.json,.png,.jpg,.jpeg,.tiff,.bmp,.webp" hidden>
+
+  <!-- Toast Notification Stack -->
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

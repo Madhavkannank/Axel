@@ -1,11 +1,15 @@
+use crate::extractor::{detect_file_type, FileType};
 use notify::{Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::Mutex;
 use std::time::Duration;
 
 pub struct FolderWatcher {
     _watcher: RecommendedWatcher,
     rx: Receiver<notify::Result<Event>>,
+    pending_queue: Mutex<VecDeque<PathBuf>>,
     #[allow(dead_code)]
     watched_dir: PathBuf,
 }
@@ -20,16 +24,28 @@ impl FolderWatcher {
 
         let (tx, rx) = channel();
 
-        let mut watcher = RecommendedWatcher::new(tx, NotifyConfig::default().with_poll_interval(Duration::from_secs(1)))
-            .map_err(|e| format!("Failed to initialize file watcher: {e}"))?;
+        let mut watcher = RecommendedWatcher::new(
+            tx,
+            NotifyConfig::default().with_poll_interval(Duration::from_secs(1)),
+        )
+        .map_err(|e| format!("Failed to initialize file watcher: {e}"))?;
 
-        watcher
-            .watch(&watched_dir, RecursiveMode::NonRecursive)
-            .map_err(|e| format!("Failed to watch directory {}: {e}", watched_dir.display()))?;
+        // Try recursive watch first; if inotify watch limit or deep tree fails, fall back to non-recursive
+        if let Err(rec_err) = watcher.watch(&watched_dir, RecursiveMode::Recursive) {
+            watcher
+                .watch(&watched_dir, RecursiveMode::NonRecursive)
+                .map_err(|e| {
+                    format!(
+                        "Failed to watch directory {}: {rec_err} / {e}",
+                        watched_dir.display()
+                    )
+                })?;
+        }
 
         Ok(Self {
             _watcher: watcher,
             rx,
+            pending_queue: Mutex::new(VecDeque::new()),
             watched_dir,
         })
     }
@@ -40,13 +56,29 @@ impl FolderWatcher {
     }
 
     pub fn poll_next_file(&self) -> Option<PathBuf> {
+        if let Ok(mut queue) = self.pending_queue.lock() {
+            if let Some(path) = queue.pop_front() {
+                return Some(path);
+            }
+        }
+
         while let Ok(event_result) = self.rx.try_recv() {
             if let Ok(event) = event_result {
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => {
+                        let mut new_paths = Vec::new();
                         for path in event.paths {
                             if Self::is_processable_file(&path) {
-                                return Some(path);
+                                new_paths.push(path);
+                            }
+                        }
+
+                        if !new_paths.is_empty() {
+                            if let Ok(mut queue) = self.pending_queue.lock() {
+                                for p in new_paths {
+                                    queue.push_back(p);
+                                }
+                                return queue.pop_front();
                             }
                         }
                     }
@@ -54,6 +86,7 @@ impl FolderWatcher {
                 }
             }
         }
+
         None
     }
 
@@ -62,20 +95,28 @@ impl FolderWatcher {
             return false;
         }
 
+        for comp in path.components() {
+            if let Some(name) = comp.as_os_str().to_str() {
+                if name.starts_with('.')
+                    || matches!(
+                        name,
+                        "target" | "node_modules" | "__pycache__" | ".git" | ".venv" | "venv"
+                    )
+                {
+                    return false;
+                }
+            }
+        }
+
         if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-            if file_name.starts_with('.') || file_name.starts_with("~") || file_name.starts_with("updated_") {
+            if file_name.starts_with('.')
+                || file_name.starts_with('~')
+                || file_name.starts_with("updated_")
+            {
                 return false;
             }
         }
 
-        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-            let ext_lower = ext.to_lowercase();
-            matches!(
-                ext_lower.as_str(),
-                "pdf" | "docx" | "jpg" | "jpeg" | "png" | "txt" | "md"
-            )
-        } else {
-            false
-        }
+        detect_file_type(path) != FileType::Unsupported
     }
 }

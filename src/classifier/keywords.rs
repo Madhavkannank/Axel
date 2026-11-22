@@ -20,8 +20,14 @@ impl KeywordExtractor {
             "only", "come", "its", "over", "think", "also", "back", "after", "use",
             "two", "how", "our", "work", "first", "well", "way", "even", "new", "want",
             "because", "any", "these", "give", "day", "most", "us", "are", "were", "was",
-            "has", "had", "can", "may", "page", "total", "date", "document", "file"
-        ].into_iter().collect();
+            "has", "had", "can", "may", "page", "total", "date", "document", "file",
+            "using", "used", "present", "same", "before", "getting", "based", "each",
+            "such", "more", "very", "here", "where", "while", "should", "must", "shall",
+            "between", "through", "under", "above", "below", "within", "without", "both",
+            "txt", "pdf", "docx", "png", "jpg", "jpeg", "webp", "md", "json", "csv",
+        ]
+        .into_iter()
+        .collect();
 
         Self { stopwords }
     }
@@ -42,8 +48,11 @@ impl KeywordExtractor {
             "diagnosis", "hospital", "patient", "medicine", "doctor", "dosage",
             "candidate", "resume", "engineer", "developer", "experience", "education",
             "assignment", "research", "project", "syllabus", "consulting", "optimization",
-            "balance", "statement", "account", "passport", "licence", "license", "aadhaar"
-        ].into_iter().collect();
+            "balance", "statement", "account", "passport", "licence", "license", "aadhaar",
+            "rust", "python", "typescript", "transformers", "attention", "algorithm",
+        ]
+        .into_iter()
+        .collect();
 
         let mut scored_words: Vec<(String, usize)> = freq
             .into_iter()
@@ -67,7 +76,6 @@ impl KeywordExtractor {
             .map(|(w, _)| w)
             .collect();
 
-        // Enforce at least 3 keywords if possible
         if keywords.len() < 3 {
             let fallbacks = ["document", "records", "file"];
             for fb in fallbacks {

@@ -12,6 +12,7 @@ axel_index.json
 *.tmp
 ml/model.pkl
 input_files/
+documents/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

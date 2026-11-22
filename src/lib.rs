@@ -2,6 +2,8 @@ pub mod ai;
 pub mod classifier;
 pub mod cli;
 pub mod config;
+pub mod desktop;
+pub mod engine;
 pub mod extractor;
 pub mod index;
 pub mod server;

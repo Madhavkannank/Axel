@@ -141,6 +141,86 @@ impl GroqClient {
         None
     }
 
+    pub async fn categorize_code(
+        &self,
+        code_snippet: &str,
+        file_name: &str,
+        symbols: &[String],
+        tokens: &[String],
+        local_hints: &[String],
+    ) -> Option<CategoryResult> {
+        let symbols_str = symbols.join(", ");
+        let tokens_str = tokens.join(", ");
+        let hints_str = local_hints.join(", ");
+
+        let prompt = format!(
+            "You are an expert code analyst. Analyze this user-written script to determine its true functional purpose and semantic concepts.\n\
+            File name: {}\n\
+            Extracted code symbols (functions, variables, classes): {}\n\
+            Deconstructed tokens: {}\n\
+            Local heuristic hints: {}\n\n\
+            Code snippet:\n{}\n\n\
+            Identify the high-level semantic concept and intent of this code (for example: if it defines math functions like add/subtract/multiply, identify it as \"calculator\" and \"arithmetic\" even if the word \"calculator\" is never explicitly written in the code; or if it uses Sobel filters/OpenCV, identify it as \"computer vision\" and \"edge detection\").\n\
+            You MUST output STRICT JSON in the following format ONLY:\n\
+            {{\n  \"category\": \"...\",\n  \"keywords\": [\"...\", \"...\"]\n}}\n\
+            Do NOT output any other text, explanation, or markdown backticks.",
+            file_name, symbols_str, tokens_str, hints_str, code_snippet
+        );
+
+        let mut models = vec![self.primary_model.clone()];
+        for m in &self.fallbacks {
+            if m != &self.primary_model {
+                models.push(m.clone());
+            }
+        }
+
+        for model in models {
+            let req = ChatRequest {
+                model: model.clone(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: prompt.clone(),
+                }],
+                temperature: 0.1,
+                max_tokens: 512,
+            };
+
+            let resp = match self
+                .client
+                .post("https://api.groq.com/openai/v1/chat/completions")
+                .bearer_auth(&self.api_key)
+                .json(&req)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[WARN] Groq code categorization request failed for model {model}: {e}");
+                    break;
+                }
+            };
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                eprintln!("[WARN] Groq API returned status {status} for model {model}");
+                if status.as_u16() == 401 || status.as_u16() == 403 {
+                    return None;
+                }
+                break;
+            }
+
+            if let Ok(body) = resp.json::<ChatResponse>().await {
+                if let Some(choice) = body.choices.first() {
+                    if let Some(parsed) = Self::parse_json_response(&choice.message.content) {
+                        return Some(parsed);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     pub fn parse_json_response(content: &str) -> Option<CategoryResult> {
         let trimmed = content.trim();
         // Look for { ... }

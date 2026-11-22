@@ -1,3 +1,4 @@
+use crate::config::resolve_workspace_path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -9,6 +10,8 @@ pub struct IndexItem {
     pub file: String,
     pub category: String,
     pub keywords: Vec<String>,
+    #[serde(default)]
+    pub symbols: Vec<String>,
     pub path: String,
     pub hash: String,
     #[serde(default)]
@@ -48,6 +51,14 @@ impl DocumentIndex {
         }
     }
 
+    pub fn from_items(items: Vec<IndexItem>) -> Self {
+        Self {
+            file_path: PathBuf::new(),
+            items,
+            dirty: false,
+        }
+    }
+
     pub fn compute_file_hash<P: AsRef<Path>>(path: P) -> Option<String> {
         let mut file = File::open(path).ok()?;
         let mut hasher = Sha256::new();
@@ -70,11 +81,19 @@ impl DocumentIndex {
 
     #[allow(dead_code)]
     pub fn find_by_path(&self, path: &str) -> Option<&IndexItem> {
-        self.items.iter().find(|item| item.path == path)
+        let target = resolve_workspace_path(Path::new(path));
+        self.items
+            .iter()
+            .find(|item| item.path == path || resolve_workspace_path(Path::new(&item.path)) == target)
     }
 
     pub fn upsert(&mut self, item: IndexItem) {
-        if let Some(pos) = self.items.iter().position(|i| i.hash == item.hash || i.path == item.path) {
+        let item_resolved = resolve_workspace_path(Path::new(&item.path));
+        if let Some(pos) = self.items.iter().position(|i| {
+            i.hash == item.hash
+                || i.path == item.path
+                || resolve_workspace_path(Path::new(&i.path)) == item_resolved
+        }) {
             self.items[pos] = item;
         } else {
             self.items.push(item);
@@ -82,13 +101,44 @@ impl DocumentIndex {
         self.dirty = true;
     }
 
+    pub fn remove_by_hash(&mut self, hash: &str) -> Option<IndexItem> {
+        if let Some(pos) = self.items.iter().position(|i| i.hash == hash) {
+            let removed = self.items.remove(pos);
+            self.dirty = true;
+            Some(removed)
+        } else {
+            None
+        }
+    }
+
+    /// Remove entries whose files no longer exist on disk or live outside `workspace`.
+    pub fn prune_missing_in_workspace(&mut self, workspace: &Path) -> usize {
+        let base = resolve_workspace_path(workspace);
+        let before = self.items.len();
+        self.items.retain(|item| {
+            let p = resolve_workspace_path(Path::new(&item.path));
+            p.exists() && p.is_file() && p.starts_with(&base)
+        });
+        let removed = before.saturating_sub(self.items.len());
+        if removed > 0 {
+            self.dirty = true;
+        }
+        removed
+    }
+
     pub fn save(&mut self) -> Result<(), std::io::Error> {
         if !self.dirty {
             return Ok(());
         }
 
+        if let Some(parent) = self.file_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
         let json = serde_json::to_string_pretty(&self.items)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         let temp_path = format!("{}.tmp", self.file_path.display());
         std::fs::write(&temp_path, json)?;
@@ -121,11 +171,11 @@ impl DocumentIndex {
             let file_lower = item.file.to_lowercase();
             let path_lower = item.path.to_lowercase();
             let kws_lower: Vec<String> = item.keywords.iter().map(|k| k.to_lowercase()).collect();
+            let symbols_lower: Vec<String> = item.symbols.iter().map(|s| s.to_lowercase()).collect();
 
             let mut score: f64 = 0.0;
             let mut match_type = "partial";
 
-            // Direct substring matches
             if cat_lower.contains(&query_clean) {
                 score = score.max(1.0);
                 match_type = "exact";
@@ -134,20 +184,41 @@ impl DocumentIndex {
                 score = score.max(0.95);
                 match_type = "exact";
             }
+            if symbols_lower.iter().any(|s| s == &query_clean) {
+                score = score.max(0.96);
+                match_type = "exact";
+            } else if symbols_lower.iter().any(|s| s.contains(&query_clean)) {
+                score = score.max(0.91);
+                match_type = "exact";
+            }
             if kws_lower.iter().any(|k| k.contains(&query_clean)) {
                 score = score.max(0.9);
                 match_type = "exact";
             }
-            if path_lower.contains(&query_clean) {
+            let is_path_query = query_clean.contains('/') || query_clean.contains('\\');
+            if (is_path_query && path_lower.contains(&query_clean))
+                || (!is_path_query
+                    && query_clean.len() >= 4
+                    && Path::new(&item.path)
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_lowercase())
+                        .as_deref()
+                        == Some(&query_clean))
+            {
                 score = score.max(0.85);
             }
 
-            // Term hit scoring
-            let term_hits = query_terms.iter().filter(|&t| {
-                cat_lower.contains(t)
-                    || file_lower.contains(t)
-                    || kws_lower.iter().any(|k| k.contains(t))
-            }).count();
+            let term_hits = query_terms
+                .iter()
+                .filter(|&t| {
+                    cat_lower.contains(t)
+                        || file_lower.contains(t)
+                        || kws_lower.iter().any(|k| k.contains(t))
+                        || symbols_lower.iter().any(|s| s.contains(t))
+                })
+                .count();
 
             if term_hits > 0 {
                 let term_score = 0.7 + (term_hits as f64 / query_terms.len() as f64) * 0.25;
@@ -161,8 +232,10 @@ impl DocumentIndex {
                     match_type: match_type.to_string(),
                 });
             } else {
-                // Fuzzy similarity
-                let best_sim = kws_lower.iter().map(|k| strsim::jaro_winkler(&query_clean, k))
+                let best_sim = kws_lower
+                    .iter()
+                    .map(|k| strsim::jaro_winkler(&query_clean, k))
+                    .chain(symbols_lower.iter().map(|s| strsim::jaro_winkler(&query_clean, s)))
                     .chain(std::iter::once(strsim::jaro_winkler(&query_clean, &file_lower)))
                     .chain(std::iter::once(strsim::jaro_winkler(&query_clean, &cat_lower)))
                     .fold(0.0f64, |acc, v| acc.max(v));
@@ -177,14 +250,71 @@ impl DocumentIndex {
             }
         }
 
-        if !exact_matches.is_empty() {
-            exact_matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-            exact_matches.truncate(limit);
-            exact_matches
-        } else {
-            fuzzy_matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-            fuzzy_matches.truncate(limit);
-            fuzzy_matches
+        let mut all_results = Vec::new();
+        all_results.extend(exact_matches);
+        all_results.extend(fuzzy_matches);
+
+        all_results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut seen = std::collections::HashSet::new();
+        let mut deduped = Vec::new();
+        for r in all_results {
+            if seen.insert(r.item.hash.clone()) {
+                deduped.push(r);
+            }
         }
+
+        deduped.truncate(limit);
+        deduped
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_search_by_variable_or_function_symbol() {
+        let items = vec![
+            IndexItem {
+                file: "10.py".to_string(),
+                category: "Code/Vision".to_string(),
+                keywords: vec!["computer vision".to_string(), "opencv".to_string()],
+                symbols: vec!["sobel_x".to_string(), "sobel_y".to_string(), "image_path".to_string()],
+                path: "/home/maddy/Dl/10.py".to_string(),
+                hash: "h10".to_string(),
+                indexed_at: None,
+            },
+            IndexItem {
+                file: "1.py".to_string(),
+                category: "Code/Math".to_string(),
+                keywords: vec!["calculator".to_string(), "arithmetic".to_string(), "math".to_string()],
+                symbols: vec!["add".to_string(), "subtract".to_string(), "multiply".to_string()],
+                path: "/home/maddy/Dl/1.py".to_string(),
+                hash: "h1".to_string(),
+                indexed_at: None,
+            },
+        ];
+
+        let index = DocumentIndex::from_items(items);
+
+        // 1. Search by exact variable name in 10.py
+        let res_var = index.search("sobel_x", 5);
+        assert_eq!(res_var.len(), 1);
+        assert_eq!(res_var[0].item.file, "10.py");
+
+        // 2. Search by concept keyword "calculator" in 1.py
+        let res_concept = index.search("calculator", 5);
+        assert_eq!(res_concept.len(), 1);
+        assert_eq!(res_concept[0].item.file, "1.py");
+
+        // 3. Search by function name "add" in 1.py
+        let res_func = index.search("add", 5);
+        assert_eq!(res_func.len(), 1);
+        assert_eq!(res_func[0].item.file, "1.py");
     }
 }

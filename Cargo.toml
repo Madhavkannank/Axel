@@ -27,10 +27,14 @@ sha2 = "0.10"
 dotenvy = "0.15"
 regex = "1.10"
 colored = "2.1"
-axum = "0.7"
+axum = { version = "0.7", features = ["multipart"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 tower-http = { version = "0.5", features = ["cors"] }
 open = "5.3"
 dirs = "5.0"
 glob = "0.3"
 strsim = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "x11"] }
+egui = "0.37"
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal", "wayland"] }

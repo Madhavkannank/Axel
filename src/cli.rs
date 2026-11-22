@@ -6,9 +6,13 @@ use std::path::PathBuf;
     name = "axel",
     version = "0.2.0",
     about = "AXEL: Automated Document Extraction, Labeling & Semantic Intelligence in Rust",
-    long_about = "A high-performance, single-binary document intelligence tool that automates text extraction (PDF, DOCX, Image OCR), AI-driven categorization, keyword extraction, and vector-precision document retrieval."
+    long_about = "A high-performance, single-binary native desktop document intelligence application that automates text extraction (PDF, DOCX, Image OCR), AI-driven categorization, keyword extraction, and semantic constellation exploration."
 )]
 pub struct Cli {
+    /// Capture a screenshot of the native desktop window to PATH and exit
+    #[arg(long, value_name = "PATH")]
+    pub screenshot: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -49,18 +53,18 @@ pub enum Commands {
         file: PathBuf,
     },
 
-    /// Launch the embedded interactive Web UI and REST API
+    /// Launch the native GPU-accelerated AXEL desktop application
     Ui {
-        /// Port number to listen on
-        #[arg(short, long)]
-        port: Option<u16>,
+        /// Optional workspace directory to open
+        #[arg(value_name = "DIR")]
+        dir: Option<PathBuf>,
 
-        /// Do not automatically open default web browser
-        #[arg(long)]
-        no_open: bool,
+        /// Capture a screenshot of the native desktop window to PATH and exit
+        #[arg(long, value_name = "PATH")]
+        screenshot: Option<PathBuf>,
     },
 
-    /// Alias for UI: Start the local server and API
+    /// Start the headless local REST API and web server
     Serve {
         /// Port number to listen on
         #[arg(short, long)]
