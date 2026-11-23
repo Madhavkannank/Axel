@@ -108,16 +108,61 @@ impl DocumentIndex {
     }
 
     pub fn compute_file_hash<P: AsRef<Path>>(path: P) -> Option<String> {
-        let mut file = File::open(path).ok()?;
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 8192];
+        use std::io::Seek;
+        let mut file = File::open(&path).ok()?;
+        let meta = file.metadata().ok()?;
+        let file_len = meta.len();
 
-        loop {
-            let bytes_read = file.read(&mut buffer).ok()?;
-            if bytes_read == 0 {
-                break;
+        let mut hasher = Sha256::new();
+
+        // For files <= 16MB (documents, images, code, pdfs): compute full SHA-256 with 64KB buffer
+        if file_len <= 16 * 1024 * 1024 {
+            let mut buffer = [0u8; 65536];
+            loop {
+                let bytes_read = file.read(&mut buffer).ok()?;
+                if bytes_read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..bytes_read]);
             }
-            hasher.update(&buffer[..bytes_read]);
+        } else {
+            // For files > 16MB (e.g. multi-gigabyte media, videos, archives):
+            // Compute compound sparse signature: size + mtime + head (64KB) + mid (64KB) + tail (64KB)
+            hasher.update(file_len.to_le_bytes());
+            if let Ok(mtime) = meta.modified() {
+                if let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                    hasher.update(duration.as_secs().to_le_bytes());
+                    hasher.update(duration.subsec_nanos().to_le_bytes());
+                }
+            }
+
+            let chunk_size = 65536;
+            let mut buffer = vec![0u8; chunk_size];
+
+            // 1. Head chunk (0..64KB)
+            if let Ok(n) = file.read(&mut buffer) {
+                hasher.update(&buffer[..n]);
+            }
+
+            // 2. Middle chunk
+            if file_len > (chunk_size as u64 * 3) {
+                let mid_pos = file_len / 2;
+                if file.seek(std::io::SeekFrom::Start(mid_pos)).is_ok() {
+                    if let Ok(n) = file.read(&mut buffer) {
+                        hasher.update(&buffer[..n]);
+                    }
+                }
+            }
+
+            // 3. Tail chunk
+            if file_len > (chunk_size as u64 * 2) {
+                let tail_pos = file_len.saturating_sub(chunk_size as u64);
+                if file.seek(std::io::SeekFrom::Start(tail_pos)).is_ok() {
+                    if let Ok(n) = file.read(&mut buffer) {
+                        hasher.update(&buffer[..n]);
+                    }
+                }
+            }
         }
 
         Some(format!("{:x}", hasher.finalize()))

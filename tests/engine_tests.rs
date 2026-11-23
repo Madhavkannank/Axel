@@ -13,7 +13,7 @@ async fn test_ai_document_analysis_pii_and_keywords() {
 
     let doc = "Quarterly consulting invoice for client services. Billing amount: $4,500. Due in 30 days.";
     let res = ai.analyze_document(doc, "invoice.txt", None).await;
-    assert_eq!(res.category, "General");
+    assert_eq!(res.category, "Finance/Invoices");
     assert!(res.keywords.contains(&"invoice".to_string()) || res.keywords.contains(&"consulting".to_string()));
 }
 
@@ -124,7 +124,7 @@ async fn test_ai_filename_fallback_when_empty() {
 
     // Empty text, but filename contains statistical tokens
     let res = ai.analyze_document("", "hospital_prescription_patient_jane.pdf", None).await;
-    assert_eq!(res.category, "General");
+    assert_eq!(res.category, "Medical/Prescription");
     assert!(res.keywords.contains(&"prescription".to_string()) || res.keywords.contains(&"hospital".to_string()));
 }
 
@@ -283,6 +283,34 @@ async fn test_pan_and_aadhaar_photo_classification_and_multi_pointer() {
     // Case 3: Offline fallback without suggested LLM paths
     let fallback_paths = compute_virtual_paths("photo_scan.png", &aadhaar_analysis.category, &[], "png");
     assert_eq!(fallback_paths, vec!["Government ID/photo_scan.png"]);
+}
+
+#[tokio::test]
+async fn test_cv_resume_classified_as_career_not_government_id() {
+    let mut config = Config::load();
+    config.groq_api_key = None; // Offline mode test
+    let ai = AiEngine::new(&config);
+
+    let cv_text = "Madhav Kannan K\n\
+                   madhavkannank2903@gmail.com\n\
+                   +916383908577\n\
+                   github.com/Madhavkannank\n\
+                   Objective: Data Science graduate student specializing in Machine Learning, Computer Vision, Deep Learning.\n\
+                   Education: Anna University B.Tech in Computer Science 2021-2025.\n\
+                   Experience: Machine Learning Intern developing PyTorch models and OpenCV Sobel filters.\n\
+                   Skills: Python, Rust, PyTorch, CUDA, Linux, Git.";
+
+    let res = ai.analyze_document(cv_text, "Madhav_Kannan_K_CV.pdf", None).await;
+
+    // Must NOT be classified as Government ID
+    assert_ne!(res.category, "Government ID", "Resume must never be categorized as Government ID");
+    assert_ne!(res.category, "General", "Resume must not be categorized as General");
+    assert!(
+        res.category.starts_with("Career/"),
+        "Resume must be categorized under Career domain, got: {}",
+        res.category
+    );
+    assert!(res.keywords.contains(&"cv".to_string()) || res.keywords.contains(&"resume".to_string()) || res.keywords.contains(&"learning".to_string()));
 }
 
 #[tokio::test]

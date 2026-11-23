@@ -40,10 +40,17 @@ pub fn is_sensitive_item(
     let lower_file = file_name.to_lowercase();
     if lower_file.contains("aadhaar")
         || lower_file.contains("aadhar")
-        || lower_file.contains("pan")
         || lower_file.contains("passport")
         || lower_file.contains("ssn")
         || lower_file.contains("voter")
+        || lower_file.contains("pan_card")
+        || lower_file.contains("pancard")
+        || lower_file.starts_with("pan.")
+        || lower_file.starts_with("pan_")
+        || lower_file.contains("_pan.")
+        || lower_file.contains("_pan_")
+        || lower_file.contains("-pan.")
+        || lower_file.contains("-pan-")
     {
         return true;
     }

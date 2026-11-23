@@ -979,22 +979,26 @@ fn spawn_background_worker(
                                 }
                             }
                             WorkerCommand::SwitchWorkspace(new_dir) => {
-                                let _ = evt_tx.send(WorkerEvent::Busy(Some(format!(
-                                    "Switching to {}...",
-                                    new_dir.display()
-                                ))));
-                                egui_ctx.request_repaint();
-
                                 config.input_folder = new_dir.clone();
-                                config.index_file = if same_dir(&new_dir, &default_input_folder) {
-                                    default_index_file.clone()
-                                } else {
-                                    new_dir.join(".axel_index.json")
-                                };
+                                config.index_file = crate::config::workspace_index_path(
+                                    &new_dir,
+                                    &default_input_folder,
+                                    &default_index_file,
+                                );
 
+                                // Phase 1: Immediate cache snapshot emission (<1ms)
                                 index = DocumentIndex::load(&config.index_file);
                                 watcher = FolderWatcher::new(&config.input_folder).ok();
 
+                                let cached_count = index.count();
+                                let initial_msg = if cached_count > 0 {
+                                    Some(format!("Loaded {} cached item(s)", cached_count))
+                                } else {
+                                    Some(format!("Scanning {}...", new_dir.display()))
+                                };
+                                emit_snapshot(&config, &index, initial_msg);
+
+                                // Phase 2: Asynchronous background delta scan
                                 let existing_hashes: HashSet<String> =
                                     index.all().iter().map(|i| i.hash.clone()).collect();
                                 let (summary, new_items) = scan_folder_into_items(
@@ -1004,16 +1008,17 @@ fn spawn_background_worker(
                                     false,
                                 )
                                 .await;
-                                for item in new_items {
-                                    index.upsert(item);
-                                }
-                                let _ = index.save();
-                                let msg = if summary.indexed > 0 {
-                                    Some(format!("Indexed {} document(s)", summary.indexed))
+                                if !new_items.is_empty() {
+                                    for item in new_items {
+                                        index.upsert(item);
+                                    }
+                                    let _ = index.save();
+                                    let msg = Some(format!("Indexed {} new document(s)", summary.indexed));
+                                    emit_snapshot(&config, &index, msg);
                                 } else {
-                                    None
-                                };
-                                emit_snapshot(&config, &index, msg);
+                                    let _ = evt_tx.send(WorkerEvent::Busy(None));
+                                    egui_ctx.request_repaint();
+                                }
                             }
                             WorkerCommand::LoadDetail(hash) => {
                                 if let Some(item) = index.find_by_hash(&hash).cloned() {
@@ -1221,13 +1226,6 @@ fn spawn_background_worker(
             }
         });
     });
-}
-
-fn same_dir(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(ca), Ok(cb)) => ca == cb,
-        _ => a == b,
-    }
 }
 
 pub fn run_desktop_app(

@@ -20,3 +20,5 @@ documents/
 models/*.onnx
 models/*.rten
 models/*.bin
+.claude/
+*.png

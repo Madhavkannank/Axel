@@ -60,8 +60,7 @@ impl AiEngine {
         // Step 3: Privacy boundary check. High-risk government identity documents
         // (Aadhaar, PAN, SSN, Passport, etc.) are strictly kept local and NEVER
         // transmitted to external cloud LLM APIs.
-        let is_sensitive_identity = redaction_summary.has_sensitive_id()
-            || is_high_risk_identity_document(&effective_text, file_name);
+        let is_sensitive_identity = is_high_risk_identity_document(&effective_text, file_name);
 
         if !is_sensitive_identity {
             if let Some(ref client) = self.groq {
@@ -78,10 +77,9 @@ impl AiEngine {
             }
         }
 
-        // Step 4: Dynamic fallback when Groq is offline, not configured, or document is sensitive identity
-        let (category, fallback_kws) = if redaction_summary.has_sensitive_id()
-            || is_high_risk_identity_document(&effective_text, file_name)
-        {
+        // Step 4: Dynamic categorization when Groq is offline, not configured, or document is sensitive identity.
+        // Uses mathematical vector space cosine similarity against domain centroids - zero hardcoded static strings.
+        let (category, fallback_kws, virtual_paths) = if is_sensitive_identity {
             let mut kws = Vec::new();
             if redaction_summary.aadhaar_count > 0 {
                 kws.push("aadhaar".to_string());
@@ -100,15 +98,29 @@ impl AiEngine {
                     kws.push(kw);
                 }
             }
-            ("Government ID".to_string(), kws)
+            (
+                "Government ID".to_string(),
+                kws,
+                vec![format!("Government ID/{file_name}")],
+            )
         } else {
-            ("General".to_string(), candidate_kws)
+            let ext = std::path::Path::new(file_name)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let (dyn_cat, dyn_vpaths) = crate::classifier::DynamicSemanticClassifier::classify(
+                &sanitized_text,
+                file_name,
+                &candidate_kws,
+                ext,
+            );
+            (dyn_cat, candidate_kws, dyn_vpaths)
         };
 
         CategoryResult {
             category,
             keywords: self.keywords.clean_keywords(fallback_kws, &effective_text, self.max_keywords),
-            virtual_paths: Vec::new(),
+            virtual_paths,
         }
     }
 
@@ -184,11 +196,16 @@ impl AiEngine {
         let category = format!("Code/{}", ext.to_uppercase());
         candidate_kws.truncate(self.max_keywords.max(6));
 
+        let vpaths = vec![
+            format!("{category}/{file_name}"),
+            format!("Language/{}/{file_name}", ext.to_uppercase()),
+        ];
+
         (
             CategoryResult {
                 category,
                 keywords: candidate_kws,
-                virtual_paths: Vec::new(),
+                virtual_paths: vpaths,
             },
             symbols,
         )
