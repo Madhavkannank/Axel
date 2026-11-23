@@ -4,7 +4,7 @@ use axel::config::Config;
 use axel::desktop;
 use axel::engine::scan_folder_with_progress;
 use axel::extractor::{self, detect_file_type, extract_text};
-use axel::index::{DocumentIndex, IndexItem};
+use axel::index::DocumentIndex;
 use axel::server;
 use axel::watcher::FolderWatcher;
 use clap::Parser;
@@ -190,24 +190,17 @@ async fn run_watch(target_dir: &Path, config: &Config) -> Result<(), Box<dyn std
                     file_name.cyan().bold()
                 );
 
-                let (text, _) = extract_text(&path);
-                let ai_res = ai.analyze_document(&text, &file_name, None).await;
+                if let Some(item) = axel::engine::analyze_and_build_item(&path, &ai).await {
+                    println!("  Category: {}", item.category.green().bold());
+                    println!("  Keywords: {}", item.keywords.join(", ").dimmed());
+                    if !item.symbols.is_empty() {
+                        println!("  Symbols:  {}", item.symbols.join(", ").magenta());
+                    }
 
-                println!("  Category: {}", ai_res.category.green().bold());
-                println!("  Keywords: {}", ai_res.keywords.join(", ").dimmed());
-
-                let item = IndexItem::new(
-                    file_name,
-                    ai_res.category,
-                    ai_res.keywords,
-                    Vec::new(),
-                    path.display().to_string(),
-                    hash,
-                );
-
-                index.upsert(item);
-                if let Err(e) = index.save() {
-                    eprintln!("[Error] Failed to save index: {e}");
+                    index.upsert(item);
+                    if let Err(e) = index.save() {
+                        eprintln!("[Error] Failed to save index: {e}");
+                    }
                 }
             }
         }
@@ -279,18 +272,19 @@ async fn run_process(file: &Path, config: &Config) -> Result<(), Box<dyn std::er
     println!("Extracted text length: {} characters", text.len());
 
     let ai = AiEngine::new(config);
-    let file_name = file
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("document");
-    let ai_res = ai.analyze_document(&text, file_name, None).await;
-
-    println!("\n{}", "Analysis Result:".bold().green());
-    println!("  Category: {}", ai_res.category.bold().yellow());
-    println!("  Keywords: {}", ai_res.keywords.join(", ").cyan());
-
-    if let Some(hash) = DocumentIndex::compute_file_hash(file) {
-        println!("  SHA-256:  {}", hash.dimmed());
+    if let Some(item) = axel::engine::analyze_and_build_item(file, &ai).await {
+        println!("\n{}", "Analysis Result:".bold().green());
+        println!("  Category:      {}", item.category.bold().yellow());
+        println!("  Keywords:      {}", item.keywords.join(", ").cyan());
+        if !item.symbols.is_empty() {
+            println!("  Symbols:       {}", item.symbols.join(", ").magenta());
+        }
+        if !item.virtual_paths.is_empty() {
+            println!("  Virtual Paths: {}", item.virtual_paths.join(" | ").blue());
+        }
+        println!("  SHA-256:       {}", item.hash.dimmed());
+    } else {
+        println!("{}", "Skipped or unsupported file type.".yellow());
     }
 
     Ok(())
@@ -322,14 +316,18 @@ async fn run_check(config: &Config) {
         );
     }
 
+    let ocr_status = extractor::ocr::detect_ocr_backend();
     print!("\nOCR Engine:       ");
-    if let Some(bin) = extractor::ocr::find_tesseract_binary() {
-        println!("{} (found at {})", "Tesseract ready".green().bold(), bin);
-    } else {
-        println!(
-            "{}",
-            "Tesseract not in PATH (Image OCR will use filename/metadata context)".yellow()
-        );
+    match ocr_status.backend {
+        extractor::ocr::OcrBackendKind::Tesseract => {
+            println!("{}", ocr_status.description.green().bold());
+        }
+        extractor::ocr::OcrBackendKind::CliWorker | extractor::ocr::OcrBackendKind::LightweightOcrsModel => {
+            println!("{}", format!("{} [Lightweight < 20MB Models]", ocr_status.description).green().bold());
+        }
+        extractor::ocr::OcrBackendKind::MetadataFallback => {
+            println!("{}", ocr_status.description.yellow());
+        }
     }
 
     let index = DocumentIndex::load(&config.index_file);
