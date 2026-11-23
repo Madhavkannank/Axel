@@ -494,6 +494,7 @@ pub async fn analyze_and_build_item_with_tfidf(
             symbols.symbols,
             resolved.display().to_string(),
             hash,
+            ai_res.virtual_paths,
         ))
     } else {
         let mut tfidf_kws = Vec::new();
@@ -512,6 +513,7 @@ pub async fn analyze_and_build_item_with_tfidf(
             Vec::new(),
             resolved.display().to_string(),
             hash,
+            ai_res.virtual_paths,
         ))
     }
 }

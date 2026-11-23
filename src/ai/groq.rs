@@ -5,6 +5,8 @@ use std::time::Duration;
 pub struct CategoryResult {
     pub category: String,
     pub keywords: Vec<String>,
+    #[serde(default)]
+    pub virtual_paths: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -73,16 +75,24 @@ impl GroqClient {
         };
 
         let prompt = format!(
-            "Analyze the following text and provide a single category and a list of MAXIMUM 5 keywords.{}\
+            "You are AXEL's semantic file intelligence engine. Analyze the following document text and metadata to determine:\n\
+            1. High-level category (e.g. \"Study Materials\", \"Identity & Documents\", \"Finance\", \"Code\", \"Media\", \"Legal\", \"Medical\", etc.)\n\
+            2. Up to 5 descriptive semantic keywords\n\
+            3. Dynamic virtual folder hierarchy paths where this file logically belongs. A single file can appear in multiple virtual folder paths simultaneously without duplicating bytes (for example: a study notes photo belongs to both \"Study Materials/<Subject>/<MaterialType>\" and \"Media/Document Scans\"; an identity card photo belongs to both \"Identity & Documents/Government ID/<CardType>\" and \"Media/Document Scans\"; a financial receipt belongs to \"Finance/Receipts/<VendorOrYear>\").\n\
+            {}\n\
             You MUST output STRICT JSON in the following format ONLY:\n\
-            {{\n  \"category\": \"...\",\n  \"keywords\": [\"...\", \"...\"]\n}}\n\
-            Do NOT output any other text, explanation, or markdown backticks.\n\n\
+            {{\n\
+              \"category\": \"...\",\n\
+              \"keywords\": [\"...\", \"...\"],\n\
+              \"virtual_paths\": [\"Folder/Subfolder/Role\", \"Media/Document Scans\"]\n\
+            }}\n\
+            Do NOT output markdown backticks, explanations, or any other text.\n\n\
             Text to analyze:\n{}",
             ml_context, text
         );
 
         let stricter_prompt = format!(
-            "Your previous output failed JSON parsing. Return ONLY raw valid JSON with keys \"category\" and \"keywords\".\nText: {}",
+            "Your previous output failed JSON parsing. Return ONLY raw valid JSON with keys \"category\", \"keywords\", and \"virtual_paths\".\nText: {}",
             text
         );
 
@@ -157,15 +167,20 @@ impl GroqClient {
         let hints_str = local_hints.join(", ");
 
         let prompt = format!(
-            "You are an expert code analyst. Analyze this user-written script to determine its true functional purpose and semantic concepts.\n\
+            "You are an expert code analyst for AXEL. Analyze this user-written script to determine its true functional purpose, semantic concepts, and virtual hierarchy.\n\
             File name: {}\n\
             Extracted code symbols (functions, variables, classes): {}\n\
             Deconstructed tokens: {}\n\
             Local heuristic hints: {}\n\n\
             Code snippet:\n{}\n\n\
             Identify the high-level semantic concept and intent of this code (for example: if it defines math functions like add/subtract/multiply, identify it as \"calculator\" and \"arithmetic\" even if the word \"calculator\" is never explicitly written in the code; or if it uses Sobel filters/OpenCV, identify it as \"computer vision\" and \"edge detection\").\n\
+            Assign natural virtual folder paths such as [\"Code/<Domain>/<Language>\"].\n\
             You MUST output STRICT JSON in the following format ONLY:\n\
-            {{\n  \"category\": \"...\",\n  \"keywords\": [\"...\", \"...\"]\n}}\n\
+            {{\n\
+              \"category\": \"...\",\n\
+              \"keywords\": [\"...\", \"...\"],\n\
+              \"virtual_paths\": [\"Code/<Domain>/<Language>\"]\n\
+            }}\n\
             Do NOT output any other text, explanation, or markdown backticks.",
             file_name, symbols_str, tokens_str, hints_str, code_snippet
         );

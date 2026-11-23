@@ -434,6 +434,7 @@ async fn upload_document(
             Vec::new(),
             target_path.display().to_string(),
             hash,
+            ai_res.virtual_paths,
         );
 
         uploaded.push(item);

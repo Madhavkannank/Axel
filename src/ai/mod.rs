@@ -58,33 +58,58 @@ impl AiEngine {
             }
         }
 
-        // Security & Privacy Shield: If document is a high-risk government identity document
-        // (Aadhaar, PAN, SSN, Passport), NEVER transmit any text to external cloud LLM APIs.
-        let is_sensitive_id = is_high_risk_identity_document(&effective_text, file_name);
-
-        // Step 2: If Groq is configured and document is NOT high-risk identity, attempt LLM reasoning with sanitized text
-        if !is_sensitive_id {
-            if let Some(ref client) = self.groq {
-                if !text.trim().is_empty() {
-                    let (sanitized_text, _) = redact_sensitive_pii(text);
-                    if let Some(mut llm_res) = client.categorize(&sanitized_text, Some(&rule_cat), &rule_kws).await {
-                        llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, text, self.max_keywords);
-                        return llm_res;
-                    }
-                } else {
-                    let context_prompt = format!("File name: {file_name}. Infer category and up to 5 keywords.");
-                    if let Some(mut llm_res) = client.categorize(&context_prompt, Some(&rule_cat), &rule_kws).await {
-                        llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, file_name, self.max_keywords);
-                        return llm_res;
-                    }
+        // Step 2: Privacy Shield + Groq Semantic Discovery Layer
+        // All sensitive personal identifiers (Aadhaar, PAN, SSN, Credit Cards, names, DOB)
+        // are thoroughly redacted prior to sending context to the cloud LLM.
+        if let Some(ref client) = self.groq {
+            let (sanitized_text, _) = redact_sensitive_pii(&effective_text);
+            if !sanitized_text.trim().is_empty() {
+                if let Some(mut llm_res) = client.categorize(&sanitized_text, Some(&rule_cat), &rule_kws).await {
+                    llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, text, self.max_keywords);
+                    return llm_res;
+                }
+            } else {
+                let context_prompt = format!("File name: {file_name}. Infer category, keywords, and virtual_paths.");
+                if let Some(mut llm_res) = client.categorize(&context_prompt, Some(&rule_cat), &rule_kws).await {
+                    llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, file_name, self.max_keywords);
+                    return llm_res;
                 }
             }
         }
 
-        // Step 3: Local on-device classification (100% private)
+        // Step 3: Offline fallback when Groq is not configured or offline
+        let is_sensitive_id = is_high_risk_identity_document(&effective_text, file_name);
+        let category = if is_sensitive_id {
+            "Government ID".to_string()
+        } else if rule_cat.is_empty() {
+            "General".to_string()
+        } else {
+            rule_cat
+        };
+
+        if is_sensitive_id {
+            let lower_eff = effective_text.to_lowercase();
+            let lower_fname = file_name.to_lowercase();
+            if (lower_eff.contains("aadhaar") || lower_eff.contains("aadhar") || lower_eff.contains("uidai")
+                || lower_eff.contains("unique identification")
+                || lower_fname.contains("aadhaar") || lower_fname.contains("aadhar"))
+                && !rule_kws.contains(&"aadhaar".to_string())
+            {
+                rule_kws.insert(0, "aadhaar".to_string());
+                rule_kws.insert(1, "government id".to_string());
+            } else if (lower_eff.contains("pan") || lower_eff.contains("income tax") || lower_eff.contains("permanent account")
+                || lower_fname.contains("pan"))
+                && !rule_kws.contains(&"pan".to_string())
+            {
+                rule_kws.insert(0, "pan".to_string());
+                rule_kws.insert(1, "government id".to_string());
+            }
+        }
+
         CategoryResult {
-            category: if rule_cat.is_empty() { "General".to_string() } else { rule_cat },
+            category,
             keywords: self.keywords.clean_keywords(rule_kws, &effective_text, self.max_keywords),
+            virtual_paths: Vec::new(),
         }
     }
 
@@ -174,6 +199,7 @@ impl AiEngine {
             CategoryResult {
                 category,
                 keywords: candidate_kws,
+                virtual_paths: Vec::new(),
             },
             symbols,
         )

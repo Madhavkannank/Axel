@@ -37,12 +37,13 @@ impl IndexItem {
         symbols: Vec<String>,
         path: String,
         hash: String,
+        virtual_paths: Vec<String>,
     ) -> Self {
         let ext = Path::new(&file)
             .extension()
             .and_then(|s| s.to_str())
             .unwrap_or_default();
-        let virtual_paths = compute_virtual_paths(&file, &category, &keywords, ext);
+        let computed_virtual_paths = compute_virtual_paths(&file, &category, &virtual_paths, ext);
         let physical_paths = vec![path.clone()];
         Self {
             file,
@@ -52,7 +53,7 @@ impl IndexItem {
             path,
             hash,
             indexed_at: Some(chrono::Utc::now().to_rfc3339()),
-            virtual_paths,
+            virtual_paths: computed_virtual_paths,
             physical_paths,
             is_duplicate: false,
         }
@@ -141,7 +142,7 @@ impl DocumentIndex {
             .unwrap_or_default();
 
         if item.virtual_paths.is_empty() {
-            item.virtual_paths = compute_virtual_paths(&item.file, &item.category, &item.keywords, ext);
+            item.virtual_paths = compute_virtual_paths(&item.file, &item.category, &[], ext);
         }
 
         if item.physical_paths.is_empty() {
@@ -419,7 +420,7 @@ mod tests {
             path: "/home/maddy/Downloads/calculus_notes.pdf".to_string(),
             hash: "same_sha256_hash_123".to_string(),
             indexed_at: None,
-            virtual_paths: Vec::new(),
+            virtual_paths: vec!["Study Materials/Calculus/Notes".to_string()],
             physical_paths: Vec::new(),
             is_duplicate: false,
         };

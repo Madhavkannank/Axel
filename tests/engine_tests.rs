@@ -245,3 +245,52 @@ fn test_watcher_filtering_and_duplicate_safety() {
     assert!(!should_skip_file(Path::new("1.py"), Some(1024)));
     assert!(!should_skip_file(Path::new("lecture.mp4"), Some(1024)));
 }
+
+#[tokio::test]
+async fn test_pan_and_aadhaar_photo_classification_and_multi_pointer() {
+    use axel::classifier::privacy::is_high_risk_identity_document;
+    use axel::index::virtual_tree::compute_virtual_paths;
+
+    let mut config = Config::load();
+    config.groq_api_key = None; // Offline mode for local unit test
+    let ai = AiEngine::new(&config);
+
+    // Case 1: Photo of PAN Card (even with generic camera filename IMG_0492.jpg)
+    let ocr_pan_text = "INCOME TAX DEPARTMENT GOVT OF INDIA \n Permanent Account Number \n ABCDE1234F \n Name: John Doe \n Father: Bob Doe \n DOB: 14/08/1992";
+    let is_pan_high_risk = is_high_risk_identity_document(ocr_pan_text, "IMG_0492.jpg");
+    assert!(is_pan_high_risk, "PAN card must trigger high-risk identity detection");
+
+    let pan_analysis = ai.analyze_document(ocr_pan_text, "IMG_0492.jpg", None).await;
+    assert_eq!(pan_analysis.category, "Government ID");
+    assert!(pan_analysis.keywords.contains(&"pan".to_string()));
+
+    let llm_pan_vpaths = vec![
+        "Identity & Documents/Government ID/PAN Card".to_string(),
+        "Media/Document Scans".to_string(),
+    ];
+    let pan_vpaths = compute_virtual_paths("IMG_0492.jpg", &pan_analysis.category, &llm_pan_vpaths, "jpg");
+    assert!(pan_vpaths.iter().any(|p| p.starts_with("Identity & Documents/Government ID/PAN Card/IMG_0492.jpg")));
+    assert!(pan_vpaths.iter().any(|p| p.starts_with("Media/Document Scans/IMG_0492.jpg")));
+
+    // Case 2: Photo of Aadhaar Card (generic filename photo_scan.png)
+    let ocr_aadhaar_text = "GOVERNMENT OF INDIA \n Unique Identification Authority of India \n 9876 5432 1098 \n Resident Identity \n DOB: 01/01/1990";
+    let is_aadhaar_high_risk = is_high_risk_identity_document(ocr_aadhaar_text, "photo_scan.png");
+    assert!(is_aadhaar_high_risk, "Aadhaar must trigger high-risk identity detection");
+
+    let aadhaar_analysis = ai.analyze_document(ocr_aadhaar_text, "photo_scan.png", None).await;
+    assert_eq!(aadhaar_analysis.category, "Government ID");
+    assert!(aadhaar_analysis.keywords.contains(&"aadhaar".to_string()));
+
+    let llm_aadhaar_vpaths = vec![
+        "Identity & Documents/Government ID/Aadhaar Card".to_string(),
+        "Media/Document Scans".to_string(),
+    ];
+    let aadhaar_vpaths = compute_virtual_paths("photo_scan.png", &aadhaar_analysis.category, &llm_aadhaar_vpaths, "png");
+    assert!(aadhaar_vpaths.iter().any(|p| p.starts_with("Identity & Documents/Government ID/Aadhaar Card/photo_scan.png")));
+    assert!(aadhaar_vpaths.iter().any(|p| p.starts_with("Media/Document Scans/photo_scan.png")));
+
+    // Case 3: Offline fallback without suggested LLM paths
+    let fallback_paths = compute_virtual_paths("photo_scan.png", &aadhaar_analysis.category, &[], "png");
+    assert_eq!(fallback_paths, vec!["Government ID/photo_scan.png"]);
+}
+

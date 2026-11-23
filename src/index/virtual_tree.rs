@@ -75,217 +75,36 @@ pub struct DuplicateCluster {
 
 /// Compute dynamic virtual paths (multiple virtual pointers) for a document.
 /// Enables a single physical file to appear in multiple logical categories without copying.
+/// Pointers are generated dynamically by the LLM (or supplied taxonomy) without hardcoded rules.
 pub fn compute_virtual_paths(
     file_name: &str,
     category: &str,
-    keywords: &[String],
-    ext: &str,
+    suggested_paths: &[String],
+    _ext: &str,
 ) -> Vec<String> {
     let mut virtual_paths = Vec::new();
-    let lower_file = file_name.to_lowercase();
-    let lower_kws: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
-    let ext_lower = ext.to_lowercase();
 
-    // 1. Check Primary Functional Taxonomy (Study Materials, Financial, Code, etc.)
-    let is_study = is_academic_or_study(category, &lower_file, &lower_kws);
-    let is_finance = is_financial_document(category, &lower_file, &lower_kws);
-    let is_code = is_programming_code(&ext_lower, category);
-    let is_photo_image = is_image_format(&ext_lower);
-    let is_video = is_video_format(&ext_lower);
-
-    // Path 1: Academic / Study Materials Hierarchy
-    if is_study {
-        let subject = detect_academic_subject(&lower_file, &lower_kws);
-        let sub_role = detect_study_sub_role(&lower_file, &lower_kws);
-        virtual_paths.push(format!("Study Materials/{subject}/{sub_role}/{file_name}"));
+    // 1. Ingest dynamic LLM-discovered semantic paths
+    for p in suggested_paths {
+        let clean = p.trim().trim_matches('/');
+        if !clean.is_empty() {
+            if clean.ends_with(file_name) {
+                virtual_paths.push(clean.to_string());
+            } else {
+                virtual_paths.push(format!("{clean}/{file_name}"));
+            }
+        }
     }
 
-    // Path 2: Financial Hierarchy
-    if is_finance {
-        let fin_role = detect_finance_sub_role(&lower_file, &lower_kws);
-        let entity = detect_entity_or_year(&lower_file, &lower_kws);
-        virtual_paths.push(format!("Finance/{fin_role}/{entity}/{file_name}"));
-    }
-
-    // Path 3: Code Hierarchy
-    if is_code {
-        let domain = detect_code_domain(&lower_file, &lower_kws);
-        let lang = language_from_ext(&ext_lower);
-        virtual_paths.push(format!("Code/{domain}/{lang}/{file_name}"));
-    }
-
-    // Path 4: Media Format Pointers (e.g. if an image is ALSO a study material)
-    if is_photo_image {
-        let photo_kind = if is_study {
-            "Document Scans"
-        } else {
-            "Photos"
-        };
-        virtual_paths.push(format!("Media/{photo_kind}/{file_name}"));
-    }
-
-    // Path 5: Video Format Pointers (e.g. if a video is a lecture vs movie)
-    if is_video {
-        let video_kind = if is_study {
-            "Educational Lectures"
-        } else if lower_file.contains("1080p")
-            || lower_file.contains("2160p")
-            || lower_file.contains("bluray")
-            || lower_file.contains("movie")
-        {
-            "Movies"
-        } else {
-            "Clips"
-        };
-        virtual_paths.push(format!("Media/Videos/{video_kind}/{file_name}"));
-    }
-
-    // Fallback: If no specialized paths triggered, use Category / Format / File
+    // 2. Dynamic Fallback: If no paths were provided by LLM/taxonomy, map directly to Category / File
     if virtual_paths.is_empty() {
-        let cat_clean = if category.is_empty() { "General" } else { category };
+        let cat_clean = if category.trim().is_empty() { "General" } else { category.trim() };
         virtual_paths.push(format!("{cat_clean}/{file_name}"));
     }
 
     virtual_paths.sort();
     virtual_paths.dedup();
     virtual_paths
-}
-
-fn is_academic_or_study(category: &str, file: &str, kws: &[String]) -> bool {
-    let cat_lower = category.to_lowercase();
-    if cat_lower.contains("academic") || cat_lower.contains("study") || cat_lower.contains("education") {
-        return true;
-    }
-    let terms = [
-        "lecture", "notes", "question paper", "exam", "midterm", "final", "syllabus",
-        "assignment", "homework", "textbook", "chapter", "module", "curriculum", "unit",
-        "calculus", "physics", "chemistry", "biology", "algebra", "ece", "cs229",
-    ];
-    terms.iter().any(|&t| file.contains(t) || kws.iter().any(|k| k.contains(t)))
-}
-
-fn detect_academic_subject(file: &str, kws: &[String]) -> String {
-    let subjects = [
-        ("Calculus", &["calculus", "derivative", "integral", "differential", "multivariable"][..]),
-        ("Mathematics", &["math", "algebra", "geometry", "trigonometry", "matrix", "linear"][..]),
-        ("Physics", &["physics", "mechanics", "thermodynamics", "optics", "quantum", "electromagnetism"][..]),
-        ("Computer Science", &["computer science", "algorithm", "data structure", "compiler", "operating system", "dbms", "networks", "machine learning"][..]),
-        ("Electrical & ECE", &["ece", "circuits", "analog", "signals", "microprocessor", "vlsi", "digital logic"][..]),
-        ("Chemistry", &["chemistry", "organic", "inorganic", "molecules", "reaction"][..]),
-        ("Biology", &["biology", "genetics", "cellular", "anatomy", "physiology"][..]),
-        ("Economics", &["economics", "macroeconomics", "microeconomics", "econometrics"][..]),
-    ];
-
-    for (name, triggers) in subjects {
-        if triggers.iter().any(|&tr| file.contains(tr) || kws.iter().any(|k| k.contains(tr))) {
-            return name.to_string();
-        }
-    }
-    "General Studies".to_string()
-}
-
-fn detect_study_sub_role(file: &str, kws: &[String]) -> String {
-    if file.contains("question") || file.contains("qp") || file.contains("exam") || file.contains("test")
-        || kws.iter().any(|k| k.contains("question") || k.contains("exam"))
-    {
-        "Question Papers".to_string()
-    } else if file.contains("assignment") || file.contains("homework") || file.contains("lab")
-        || kws.iter().any(|k| k.contains("assignment") || k.contains("lab"))
-    {
-        "Assignments & Labs".to_string()
-    } else if file.contains("lecture") || file.contains("slide") || file.contains("ppt")
-        || kws.iter().any(|k| k.contains("lecture") || k.contains("slide"))
-    {
-        "Lecture Materials".to_string()
-    } else if file.contains("syllabus") || file.contains("curriculum") {
-        "Syllabus & Guides".to_string()
-    } else {
-        "Notes & Reference".to_string()
-    }
-}
-
-fn is_financial_document(category: &str, file: &str, kws: &[String]) -> bool {
-    let cat_lower = category.to_lowercase();
-    if cat_lower.contains("invoice") || cat_lower.contains("finance") || cat_lower.contains("receipt") {
-        return true;
-    }
-    let terms = ["invoice", "receipt", "billing", "tax", "gst", "statement", "payroll", "salary"];
-    terms.iter().any(|&t| file.contains(t) || kws.iter().any(|k| k.contains(t)))
-}
-
-fn detect_finance_sub_role(file: &str, kws: &[String]) -> String {
-    if file.contains("receipt") || kws.iter().any(|k| k.contains("receipt")) {
-        "Receipts".to_string()
-    } else if file.contains("tax") || file.contains("gst") || kws.iter().any(|k| k.contains("tax")) {
-        "Tax & Filings".to_string()
-    } else if file.contains("statement") || kws.iter().any(|k| k.contains("statement")) {
-        "Bank Statements".to_string()
-    } else {
-        "Invoices".to_string()
-    }
-}
-
-fn detect_entity_or_year(file: &str, kws: &[String]) -> String {
-    // Check for years 2020..2030
-    for year in 2020..=2030 {
-        let yr_str = year.to_string();
-        if file.contains(&yr_str) || kws.iter().any(|k| k.contains(&yr_str)) {
-            return yr_str;
-        }
-    }
-    "Corporate & Client".to_string()
-}
-
-fn is_programming_code(ext: &str, category: &str) -> bool {
-    let cat_lower = category.to_lowercase();
-    if cat_lower.contains("code") || cat_lower.contains("technical") {
-        return true;
-    }
-    matches!(
-        ext,
-        "py" | "rs" | "js" | "ts" | "tsx" | "jsx" | "go" | "c" | "cpp" | "java" | "sh" | "sql" | "html" | "css"
-    )
-}
-
-fn detect_code_domain(file: &str, kws: &[String]) -> String {
-    let domains = [
-        ("Computer Vision", &["vision", "cv2", "opencv", "sobel", "image", "filter", "yolo"][..]),
-        ("Mathematics & ML", &["calc", "math", "add", "subtract", "matrix", "tensor", "torch", "numpy"][..]),
-        ("Web & Frontend", &["web", "react", "html", "css", "vue", "frontend", "dom"][..]),
-        ("Backend & APIs", &["api", "server", "endpoint", "database", "sql", "axum", "express"][..]),
-        ("Automation & Tools", &["script", "bot", "crawler", "scraper", "cli", "tool"][..]),
-    ];
-
-    for (name, triggers) in domains {
-        if triggers.iter().any(|&tr| file.contains(tr) || kws.iter().any(|k| k.contains(tr))) {
-            return name.to_string();
-        }
-    }
-    "Utilities".to_string()
-}
-
-fn language_from_ext(ext: &str) -> &'static str {
-    match ext {
-        "py" => "Python",
-        "rs" => "Rust",
-        "js" => "JavaScript",
-        "ts" | "tsx" => "TypeScript",
-        "go" => "Go",
-        "c" | "h" => "C",
-        "cpp" | "hpp" => "C++",
-        "java" => "Java",
-        "sh" | "bash" => "Shell",
-        "sql" => "SQL",
-        _ => "General Code",
-    }
-}
-
-fn is_image_format(ext: &str) -> bool {
-    matches!(ext, "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tiff" | "tif")
-}
-
-fn is_video_format(ext: &str) -> bool {
-    matches!(ext, "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv")
 }
 
 /// Construct the complete Virtual Directory Tree from a set of indexed items.
@@ -300,9 +119,9 @@ pub fn build_virtual_tree<T: AsRef<crate::index::IndexItem>>(items: &[T]) -> Vir
             .unwrap_or_default();
 
         let paths = if item.virtual_paths.is_empty() {
-            compute_virtual_paths(&item.file, &item.category, &item.keywords, ext)
+            compute_virtual_paths(&item.file, &item.category, &[], ext)
         } else {
-            item.virtual_paths.clone()
+            compute_virtual_paths(&item.file, &item.category, &item.virtual_paths, ext)
         };
 
         for vp in paths {
@@ -326,14 +145,13 @@ mod tests {
 
     #[test]
     fn test_photo_of_study_material_gets_multi_pointer() {
-        let kws = vec![
-            "calculus".to_string(),
-            "derivative".to_string(),
-            "lecture notes".to_string(),
+        let llm_paths = vec![
+            "Study Materials/Calculus/Lecture Materials".to_string(),
+            "Media/Document Scans".to_string(),
         ];
-        let paths = compute_virtual_paths("IMG_2026_lecture_slide.jpg", "Study Material", &kws, "jpg");
+        let paths = compute_virtual_paths("IMG_2026_lecture_slide.jpg", "Study Material", &llm_paths, "jpg");
 
-        // Must appear in both Study Materials AND Media/Photos!
+        // Appears in both Study Materials AND Media/Document Scans via dynamic LLM pointers
         assert!(paths.iter().any(|p| p.starts_with("Study Materials/Calculus/Lecture Materials/")));
         assert!(paths.iter().any(|p| p.starts_with("Media/Document Scans/")));
         assert_eq!(paths.len(), 2);
@@ -350,7 +168,7 @@ mod tests {
                 path: "/home/maddy/Downloads/calculus_exam_2026.pdf".to_string(),
                 hash: "h_calc".to_string(),
                 indexed_at: None,
-                virtual_paths: Vec::new(),
+                virtual_paths: vec!["Study Materials/Calculus/Exams".to_string()],
                 physical_paths: vec!["/home/maddy/Downloads/calculus_exam_2026.pdf".to_string()],
                 is_duplicate: false,
             },
@@ -362,7 +180,10 @@ mod tests {
                 path: "/home/maddy/Downloads/matrix_notes.jpg".to_string(),
                 hash: "h_matrix".to_string(),
                 indexed_at: None,
-                virtual_paths: Vec::new(),
+                virtual_paths: vec![
+                    "Study Materials/Mathematics/Notes".to_string(),
+                    "Media/Document Scans".to_string(),
+                ],
                 physical_paths: vec!["/home/maddy/Downloads/matrix_notes.jpg".to_string()],
                 is_duplicate: false,
             },
@@ -370,7 +191,7 @@ mod tests {
 
         let tree = build_virtual_tree(&items);
 
-        // Verify root contains "Study Materials" and "Media"
+        // Verify root contains "Study Materials" and "Media" (matrix_notes.jpg has Media/Document Scans pointer)
         assert!(tree.subfolders.contains_key("Study Materials"));
         assert!(tree.subfolders.contains_key("Media"));
 
