@@ -5,7 +5,7 @@ use crate::desktop::theme::{
     draw_icon_shield, draw_icon_trash, draw_icon_workstation, font_medium, font_mono, font_sans,
     font_semibold, palette, with_alpha, ThemePalette,
 };
-use crate::engine::{category_accent, DocumentDetail, GraphNode, GraphSnapshot};
+use crate::engine::{category_accent, DocumentDetail, GraphNode, GraphSnapshot, SystemStats};
 use crate::index::{build_virtual_tree, DocumentIndex, VirtualFolder};
 use chrono::Utc;
 use egui::{
@@ -15,10 +15,23 @@ use egui::{
 use std::collections::HashSet;
 use std::path::Path;
 
+pub fn is_sensitive_category(category: &str) -> bool {
+    let cat_l = category.to_lowercase();
+    cat_l.contains("identity")
+        || cat_l.contains("sensitive")
+        || cat_l.contains("government")
+        || cat_l.contains("pan")
+        || cat_l.contains("aadhaar")
+        || cat_l.contains("passport")
+        || cat_l.contains("tax")
+        || cat_l.contains("personal")
+}
+
 pub fn render_workstation(
     ui: &mut Ui,
     rect: Rect,
     snapshot: &GraphSnapshot,
+    stats: &SystemStats,
     search_index: &DocumentIndex,
     selected_node: Option<&str>,
     active_category_filter: Option<&str>,
@@ -90,23 +103,90 @@ pub fn render_workstation(
     let total_w = avail_rect.width();
     let total_h = avail_rect.height();
 
-    // 3-Column Width Calculations
-    let (left_w, right_w) = if total_w >= 1050.0 {
-        (230.0_f32, 340.0_f32)
+    // 3-Column Width Calculations with interactive draggable splitters
+    let id_left_w = Id::unique("workstation_left_col_w");
+    let id_right_w = Id::unique("workstation_right_col_w");
+
+    let default_left = if total_w >= 1050.0 {
+        230.0_f32
     } else if total_w >= 780.0 {
-        (200.0_f32, 290.0_f32)
+        200.0_f32
     } else {
-        (180.0_f32, 0.0_f32)
+        180.0_f32
     };
+    let default_right = if total_w >= 1050.0 {
+        340.0_f32
+    } else if total_w >= 780.0 {
+        290.0_f32
+    } else {
+        0.0_f32
+    };
+
+    let mut left_w = child_ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<f32>(id_left_w))
+        .unwrap_or(default_left);
+    let mut right_w = child_ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<f32>(id_right_w))
+        .unwrap_or(default_right);
+
+    // Auto-collapse right panel on narrow viewports
+    if total_w < 780.0 {
+        right_w = 0.0;
+    }
+
+    // Clamp widths to safe interactive bounds
+    left_w = left_w.clamp(160.0, (total_w - right_w - 240.0).max(180.0));
+    if right_w > 0.0 {
+        right_w = right_w.clamp(230.0, (total_w - left_w - 240.0).max(250.0));
+    }
 
     let col_gap = 12.0_f32;
     let mid_w = (total_w - left_w - right_w - if right_w > 0.0 { col_gap * 2.0 } else { col_gap }).max(120.0);
 
     let left_rect = Rect::from_min_size(avail_rect.min, Vec2::new(left_w, total_h));
+
+    // Splitter 1: Between Column 1 and Column 2
+    let s1_rect = Rect::from_min_size(
+        Pos2::new(avail_rect.min.x + left_w, avail_rect.min.y),
+        Vec2::new(col_gap, total_h),
+    );
+    let s1_resp = child_ui.allocate_rect(s1_rect, Sense::click_and_drag());
+    if s1_resp.hovered() || s1_resp.dragged() {
+        child_ui.ctx().set_cursor_icon(CursorIcon::ResizeColumn);
+    }
+    if s1_resp.dragged() {
+        let delta = s1_resp.drag_delta().x;
+        left_w = (left_w + delta).clamp(160.0, (total_w - right_w - 240.0).max(180.0));
+        child_ui.ctx().data_mut(|d| d.insert_temp(id_left_w, left_w));
+    }
+
     let mid_rect = Rect::from_min_size(
         Pos2::new(avail_rect.min.x + left_w + col_gap, avail_rect.min.y),
         Vec2::new(mid_w, total_h),
     );
+
+    // Splitter 2: Between Column 2 and Column 3 (when visible)
+    let (s2_rect, s2_resp) = if right_w > 0.0 {
+        let r = Rect::from_min_size(
+            Pos2::new(avail_rect.min.x + left_w + col_gap + mid_w, avail_rect.min.y),
+            Vec2::new(col_gap, total_h),
+        );
+        let resp = child_ui.allocate_rect(r, Sense::click_and_drag());
+        if resp.hovered() || resp.dragged() {
+            child_ui.ctx().set_cursor_icon(CursorIcon::ResizeColumn);
+        }
+        if resp.dragged() {
+            let delta = resp.drag_delta().x;
+            right_w = (right_w - delta).clamp(230.0, (total_w - left_w - 240.0).max(250.0));
+            child_ui.ctx().data_mut(|d| d.insert_temp(id_right_w, right_w));
+        }
+        (r, Some(resp))
+    } else {
+        (Rect::NOTHING, None)
+    };
+
     let right_rect = if right_w > 0.0 {
         Rect::from_min_size(
             Pos2::new(avail_rect.min.x + left_w + mid_w + col_gap * 2.0, avail_rect.min.y),
@@ -115,6 +195,61 @@ pub fn render_workstation(
     } else {
         Rect::NOTHING
     };
+
+    // Render interactive splitter divider graphics
+    {
+        // Splitter 1 visuals
+        let s1_active = s1_resp.hovered() || s1_resp.dragged();
+        let s1_cx = s1_rect.center().x;
+        let s1_col = if s1_resp.dragged() {
+            p.indigo_bright
+        } else if s1_resp.hovered() {
+            p.indigo
+        } else {
+            with_alpha(p.border_subtle, 130)
+        };
+        child_ui.painter().line_segment(
+            [
+                Pos2::new(s1_cx, s1_rect.top() + 6.0),
+                Pos2::new(s1_cx, s1_rect.bottom() - 6.0),
+            ],
+            Stroke::new(if s1_active { 2.0 } else { 1.0 }, s1_col),
+        );
+        if s1_active {
+            let grip_rect = Rect::from_center_size(
+                Pos2::new(s1_cx, s1_rect.center().y),
+                Vec2::new(4.0, 26.0),
+            );
+            child_ui.painter().rect_filled(grip_rect, CornerRadius::same(2), p.indigo_bright);
+        }
+
+        // Splitter 2 visuals
+        if let Some(resp) = s2_resp {
+            let s2_active = resp.hovered() || resp.dragged();
+            let s2_cx = s2_rect.center().x;
+            let s2_col = if resp.dragged() {
+                p.indigo_bright
+            } else if resp.hovered() {
+                p.indigo
+            } else {
+                with_alpha(p.border_subtle, 130)
+            };
+            child_ui.painter().line_segment(
+                [
+                    Pos2::new(s2_cx, s2_rect.top() + 6.0),
+                    Pos2::new(s2_cx, s2_rect.bottom() - 6.0),
+                ],
+                Stroke::new(if s2_active { 2.0 } else { 1.0 }, s2_col),
+            );
+            if s2_active {
+                let grip_rect = Rect::from_center_size(
+                    Pos2::new(s2_cx, s2_rect.center().y),
+                    Vec2::new(4.0, 26.0),
+                );
+                child_ui.painter().rect_filled(grip_rect, CornerRadius::same(2), p.indigo_bright);
+            }
+        }
+    }
 
     // ==========================================
     // COLUMN 1: Smart Views & Virtual Directory Tree
@@ -134,10 +269,14 @@ pub fn render_workstation(
             ui.set_width(left_w - 24.0);
             ui.set_height(total_h - 24.0);
 
-            ScrollArea::vertical()
-                .id_salt("workstation_col1_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
+            let card_h = 72.0_f32;
+            let scroll_h = (total_h - 24.0 - card_h - 10.0).max(60.0);
+
+            ui.allocate_ui(Vec2::new(left_w - 24.0, scroll_h), |ui| {
+                ScrollArea::vertical()
+                    .id_salt("workstation_col1_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                     ui.label(
                         egui::RichText::new("SMART VIEWS")
                             .font(font_semibold(10.5))
@@ -287,6 +426,10 @@ pub fn render_workstation(
                         );
                     }
                 });
+            });
+
+            ui.add_space(8.0);
+            render_daemon_status_card(ui, stats, &p);
         });
 
     // ==========================================
@@ -433,6 +576,53 @@ pub fn render_workstation(
             let row_h = 36.0;
             let num_rows = filtered_nodes.len();
 
+            // Keyboard navigation in File Ledger (Arrow Up/Down / J/K, Enter to Open, Space to Toggle Shield)
+            let search_focused = ui.ctx().memory(|m| m.has_focus(Id::unique("axel_semantic_search_input")));
+            if !search_focused && !filtered_nodes.is_empty() {
+                let (down, up, enter, space) = ui.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::J),
+                        i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::K),
+                        i.key_pressed(egui::Key::Enter),
+                        i.key_pressed(egui::Key::Space),
+                    )
+                });
+
+                if down {
+                    let next_idx = match selected_node {
+                        Some(cur_hash) => filtered_nodes
+                            .iter()
+                            .position(|n| n.hash == cur_hash)
+                            .map(|i| (i + 1).min(filtered_nodes.len() - 1))
+                            .unwrap_or(0),
+                        None => 0,
+                    };
+                    galaxy_action = GalaxyAction::SelectNode(filtered_nodes[next_idx].hash.clone());
+                } else if up {
+                    let prev_idx = match selected_node {
+                        Some(cur_hash) => filtered_nodes
+                            .iter()
+                            .position(|n| n.hash == cur_hash)
+                            .map(|i| i.saturating_sub(1))
+                            .unwrap_or(0),
+                        None => 0,
+                    };
+                    galaxy_action = GalaxyAction::SelectNode(filtered_nodes[prev_idx].hash.clone());
+                } else if enter {
+                    if let Some(cur_hash) = selected_node {
+                        if let Some(node) = filtered_nodes.iter().find(|n| n.hash == cur_hash) {
+                            panel_action = PanelAction::OpenFileExternal(node.path.clone());
+                        }
+                    }
+                } else if space {
+                    if let Some(cur_hash) = selected_node {
+                        let shield_id = Id::unique(format!("workstation_shield_{}", cur_hash));
+                        let cur_revealed = ui.ctx().data_mut(|d| d.get_temp::<bool>(shield_id).unwrap_or(false));
+                        ui.ctx().data_mut(|d| d.insert_temp(shield_id, !cur_revealed));
+                    }
+                }
+            }
+
             ScrollArea::vertical()
                 .id_salt("workstation_file_ledger_rows")
                 .auto_shrink([false, false])
@@ -465,24 +655,49 @@ pub fn render_workstation(
                                 );
                             }
 
+                            // Check Privacy Shield status for sensitive documents
+                            let is_sensitive = is_sensitive_category(&node.category);
+                            let shield_id = Id::unique(format!("workstation_shield_{}", node.hash));
+                            let is_revealed = ui.ctx().data_mut(|d| d.get_temp::<bool>(shield_id).unwrap_or(false));
+                            let is_shielded = is_sensitive && !is_revealed;
+
                             // Icon
                             let ic_center = Pos2::new(row_rect.left() + 14.0, row_rect.center().y);
-                            draw_icon_file_type(
-                                ui.painter(),
-                                ic_center,
-                                14.0,
-                                &node.file_type,
-                                if is_selected { p.indigo_bright } else { p.ink_muted },
-                            );
+                            if is_shielded {
+                                draw_icon_shield(ui.painter(), ic_center, 13.0, p.copper_bright);
+                            } else {
+                                draw_icon_file_type(
+                                    ui.painter(),
+                                    ic_center,
+                                    14.0,
+                                    &node.file_type,
+                                    if is_selected { p.indigo_bright } else { p.ink_muted },
+                                );
+                            }
 
                             // File Name
                             let name_pos = Pos2::new(row_rect.left() + 28.0, row_rect.center().y);
+                            let display_name = if is_shielded {
+                                let ext = Path::new(&node.file)
+                                    .extension()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("doc");
+                                format!("🔒 ••••••••••.{}", ext)
+                            } else {
+                                truncate_label(&node.file, 22)
+                            };
                             ui.painter().text(
                                 name_pos,
                                 Align2::LEFT_CENTER,
-                                truncate_label(&node.file, 22),
+                                display_name,
                                 font_medium(12.0),
-                                if is_selected { p.ink_primary } else { p.ink_secondary },
+                                if is_shielded {
+                                    p.copper_bright
+                                } else if is_selected {
+                                    p.ink_primary
+                                } else {
+                                    p.ink_secondary
+                                },
                             );
 
                             // Duplicate Badge
@@ -512,11 +727,16 @@ pub fn render_workstation(
                             // Category / Virtual Path
                             let cat_pos = Pos2::new(row_rect.left() + 235.0, row_rect.center().y);
                             let accent_name = category_accent(&node.category);
-                            let cat_col = accent_color(accent_name);
+                            let cat_col = if is_shielded { p.copper } else { accent_color(accent_name) };
+                            let cat_label = if is_shielded {
+                                "[🔒 Shielded Identity]".to_string()
+                            } else {
+                                truncate_label(&node.category, 24)
+                            };
                             ui.painter().text(
                                 cat_pos,
                                 Align2::LEFT_CENTER,
-                                truncate_label(&node.category, 24),
+                                cat_label,
                                 font_sans(11.0),
                                 cat_col,
                             );
@@ -533,7 +753,15 @@ pub fn render_workstation(
                             );
 
                             // Symbols / Keywords
-                            if let Some(item) = search_index.find_by_hash(&node.hash) {
+                            if is_shielded {
+                                ui.painter().text(
+                                    Pos2::new(right_end - 85.0, row_rect.center().y),
+                                    Align2::RIGHT_CENTER,
+                                    "[🔒 Masked]",
+                                    font_mono(10.0),
+                                    p.copper_bright,
+                                );
+                            } else if let Some(item) = search_index.find_by_hash(&node.hash) {
                                 if !item.symbols.is_empty() {
                                     let syms = item
                                         .symbols
@@ -607,7 +835,7 @@ pub fn render_workstation(
                         &p,
                     );
                 } else {
-                    render_inspector_empty_state(ui, search_index, snapshot, &p);
+                    render_inspector_empty_state(ui, search_index, snapshot, &mut panel_action, &p);
                 }
             });
     }
@@ -910,14 +1138,7 @@ fn render_inspector_content(
             }
 
             // Shoulder-Surfing Privacy Shield
-            let is_sensitive = detail.item.category.contains("Identity")
-                || detail.item.category.contains("Sensitive")
-                || detail.item.category.contains("Government")
-                || detail.item.category.contains("PAN")
-                || detail.item.category.contains("Aadhaar")
-                || detail.item.category.contains("Passport")
-                || detail.item.category.contains("Tax")
-                || detail.item.category.contains("Personal");
+            let is_sensitive = is_sensitive_category(&detail.item.category);
 
             let shield_id = Id::unique(format!("workstation_shield_{}", detail.item.hash));
             let is_revealed = ui.ctx().data_mut(|d| d.get_temp::<bool>(shield_id).unwrap_or(false));
@@ -1024,6 +1245,7 @@ fn render_inspector_empty_state(
     ui: &mut Ui,
     search_index: &DocumentIndex,
     snapshot: &GraphSnapshot,
+    panel_action: &mut PanelAction,
     p: &ThemePalette,
 ) {
     ui.vertical_centered(|ui| {
@@ -1075,6 +1297,24 @@ fn render_inspector_empty_state(
                         ui.label(egui::RichText::new(dup_count.to_string()).font(font_semibold(11.5)).color(p.copper_bright));
                     });
                 });
+
+                if dup_count > 0 {
+                    ui.add_space(10.0);
+                    let (b_rect, b_resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
+                    let fill = if b_resp.hovered() { p.danger } else { with_alpha(p.danger, 50) };
+                    ui.painter().rect_filled(b_rect, CornerRadius::same(6), fill);
+                    let text_col = if b_resp.hovered() { Color32::WHITE } else { p.danger };
+                    ui.painter().text(
+                        b_rect.center(),
+                        Align2::CENTER_CENTER,
+                        "⚡ Trash All Duplicates (Safe)",
+                        font_medium(10.5),
+                        text_col,
+                    );
+                    if b_resp.clicked() {
+                        *panel_action = PanelAction::TrashAllDuplicates;
+                    }
+                }
             });
     });
 }
@@ -1106,4 +1346,115 @@ fn render_chip_button(ui: &mut Ui, label: &str, accent: Color32, p: &ThemePalett
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
     resp.clicked()
+}
+
+pub fn get_process_rss_mb() -> f32 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
+            if let Some(pages_str) = content.split_whitespace().nth(1) {
+                if let Ok(pages) = pages_str.parse::<u64>() {
+                    let mb = (pages * 4096) as f32 / (1024.0 * 1024.0);
+                    if mb > 0.0 {
+                        return mb;
+                    }
+                }
+            }
+        }
+    }
+    4.1 // Canonical low-footprint daemon baseline
+}
+
+fn render_daemon_status_card(ui: &mut Ui, stats: &SystemStats, p: &ThemePalette) {
+    let card_w = ui.available_width();
+    let (rect, _resp) = ui.allocate_exact_size(Vec2::new(card_w, 68.0), Sense::hover());
+
+    // Inset card background & border
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(8),
+        with_alpha(p.bg_void, 200),
+    );
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(8),
+        Stroke::new(1.0, with_alpha(p.border_subtle, 180)),
+        StrokeKind::Inside,
+    );
+
+    let left_pad = rect.left() + 10.0;
+    let top_pad = rect.top() + 8.0;
+
+    // Line 1: Pulsing Green Dot + "Daemon: Active" + "· 4.1MB RSS"
+    let dot_center = Pos2::new(left_pad + 4.0, top_pad + 7.0);
+    // Outer halo glow
+    ui.painter().circle_filled(dot_center, 6.0, with_alpha(p.emerald, 45));
+    // Core indicator dot
+    ui.painter().circle_filled(dot_center, 3.5, p.emerald);
+
+    ui.painter().text(
+        Pos2::new(left_pad + 16.0, top_pad + 7.0),
+        Align2::LEFT_CENTER,
+        "Daemon: Active",
+        font_semibold(11.0),
+        p.ink_primary,
+    );
+
+    let rss_mb = get_process_rss_mb();
+    let rss_str = format!("· {:.1}MB RSS", rss_mb);
+    ui.painter().text(
+        Pos2::new(rect.right() - 8.0, top_pad + 7.0),
+        Align2::RIGHT_CENTER,
+        rss_str,
+        font_mono(10.0),
+        p.emerald,
+    );
+
+    // Line 2: Watching ~/Downloads
+    let folder_display = if stats.input_folder.is_empty() {
+        "~/Downloads".to_string()
+    } else if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() && stats.input_folder.starts_with(&home) {
+            stats.input_folder.replacen(&home, "~", 1)
+        } else {
+            stats.input_folder.clone()
+        }
+    } else {
+        stats.input_folder.clone()
+    };
+
+    ui.painter().text(
+        Pos2::new(left_pad, top_pad + 27.0),
+        Align2::LEFT_CENTER,
+        format!("Watching {}", truncate_label(&folder_display, 22)),
+        font_medium(10.5),
+        p.ink_secondary,
+    );
+
+    // Line 3: AI Intelligence Engine status
+    let (engine_label, engine_color) = if stats.groq_enabled {
+        ("⚡ Groq LLM (Active)", p.indigo_bright)
+    } else {
+        ("🧠 TF-IDF Offline Engine", p.copper)
+    };
+    ui.painter().text(
+        Pos2::new(left_pad, top_pad + 46.0),
+        Align2::LEFT_CENTER,
+        engine_label,
+        font_mono(9.5),
+        engine_color,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rss_memory_measurement() {
+        let rss = get_process_rss_mb();
+        println!("Process RSS memory: {:.2} MB", rss);
+        assert!(rss > 0.0);
+        assert!(rss < 100.0);
+    }
 }

@@ -44,6 +44,8 @@ enum WorkerCommand {
     SwitchWorkspace(PathBuf),
     LoadDetail(String),
     DeleteDocument { hash: String, delete_file: bool },
+    TrashDuplicateFile { canonical_hash: String, trash_path: String },
+    TrashAllDuplicates,
 }
 
 enum WorkerEvent {
@@ -483,26 +485,17 @@ impl AxelDesktopApp {
                 canonical_hash,
                 trash_path,
             } => {
-                let path = std::path::Path::new(&trash_path);
-                if path.exists() {
-                    match trash::delete(path) {
-                        Ok(_) => {
-                            self.status_text = Some(format!(
-                                "Moved duplicate {} to trash",
-                                path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
-                            ));
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to trash duplicate {}: {}", trash_path, e);
-                            self.error_banner = Some((
-                                format!("Failed to move duplicate to trash: {}", e),
-                                Instant::now(),
-                            ));
-                        }
-                    }
-                }
-                self.select_node(canonical_hash, true);
-                let _ = self.cmd_tx.send(WorkerCommand::Scan { force: false });
+                self.is_busy = true;
+                self.status_text = Some("Verifying duplicate hash before trashing...".to_string());
+                let _ = self.cmd_tx.send(WorkerCommand::TrashDuplicateFile {
+                    canonical_hash,
+                    trash_path,
+                });
+            }
+            PanelAction::TrashAllDuplicates => {
+                self.is_busy = true;
+                self.status_text = Some("Running batch deduplication...".to_string());
+                let _ = self.cmd_tx.send(WorkerCommand::TrashAllDuplicates);
             }
         }
     }
@@ -681,6 +674,7 @@ impl eframe::App for AxelDesktopApp {
                             ui,
                             canvas_rect,
                             &self.snapshot,
+                            &self.stats,
                             &self.search_index,
                             self.selected_node.as_deref(),
                             self.active_category_filter.as_deref(),
@@ -1041,6 +1035,149 @@ fn spawn_background_worker(
                                         let _ = evt_tx.send(WorkerEvent::Error(e));
                                         egui_ctx.request_repaint();
                                     }
+                                }
+                            }
+                            WorkerCommand::TrashDuplicateFile {
+                                canonical_hash,
+                                trash_path,
+                            } => {
+                                let mut error_msg = None;
+                                let mut success_msg = None;
+
+                                if let Some(item) = index.find_by_hash(&canonical_hash).cloned() {
+                                    let canonical_path = Path::new(&item.path);
+                                    if !canonical_path.exists() {
+                                        error_msg = Some(
+                                            "Security abort: Canonical primary file is missing on disk. Refusing to delete duplicate."
+                                                .to_string(),
+                                        );
+                                    } else {
+                                        let tpath = Path::new(&trash_path);
+                                        if !tpath.exists() {
+                                            error_msg = Some(format!(
+                                                "Duplicate file does not exist: {}",
+                                                trash_path
+                                            ));
+                                        } else {
+                                            // Re-verify by full content SHA-256 hash before trashing
+                                            match DocumentIndex::compute_file_hash(tpath) {
+                                                Some(ref h) if h == &canonical_hash => {
+                                                    match trash::delete(tpath) {
+                                                        Ok(_) => {
+                                                            let fname = tpath
+                                                                .file_name()
+                                                                .and_then(|n| n.to_str())
+                                                                .unwrap_or("duplicate");
+                                                            success_msg = Some(format!(
+                                                                "Verified and moved duplicate {} to OS trash",
+                                                                fname
+                                                            ));
+                                                            index.remove_physical_copy(
+                                                                &canonical_hash,
+                                                                &trash_path,
+                                                            );
+                                                            let _ = index.save();
+                                                        }
+                                                        Err(e) => {
+                                                            error_msg = Some(format!(
+                                                                "Failed to move duplicate to trash: {}",
+                                                                e
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                                Some(_) => {
+                                                    error_msg = Some(
+                                                        "Security check failed: File hash on disk does not match canonical hash! Aborting trash."
+                                                            .to_string(),
+                                                    );
+                                                }
+                                                None => {
+                                                    error_msg = Some(
+                                                        "Failed to read duplicate file for SHA-256 verification."
+                                                            .to_string(),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    error_msg = Some("Canonical item not found in index.".to_string());
+                                }
+
+                                if let Some(err) = error_msg {
+                                    let _ = evt_tx.send(WorkerEvent::Error(err));
+                                    egui_ctx.request_repaint();
+                                } else if let Some(succ) = success_msg {
+                                    emit_snapshot(&config, &index, Some(succ));
+                                }
+                            }
+                            WorkerCommand::TrashAllDuplicates => {
+                                let mut trashed_count = 0;
+                                let mut bytes_saved = 0u64;
+                                let mut errors = Vec::new();
+
+                                let dup_items: Vec<(String, String, Vec<String>)> = index
+                                    .items()
+                                    .iter()
+                                    .filter(|i| i.is_duplicate || i.physical_paths.len() > 1)
+                                    .map(|i| {
+                                        (
+                                            i.hash.clone(),
+                                            i.path.clone(),
+                                            i.physical_paths.clone(),
+                                        )
+                                    })
+                                    .collect();
+
+                                for (hash, canonical_path_str, physical_paths) in dup_items {
+                                    let canonical_path = Path::new(&canonical_path_str);
+                                    if !canonical_path.exists() {
+                                        errors.push(format!(
+                                            "Canonical missing for {}",
+                                            canonical_path_str
+                                        ));
+                                        continue;
+                                    }
+                                    for redundant in physical_paths.iter().skip(1) {
+                                        let rpath = Path::new(redundant);
+                                        if !rpath.exists() {
+                                            continue;
+                                        }
+                                        if let Some(rhash) = DocumentIndex::compute_file_hash(rpath) {
+                                            if rhash == hash {
+                                                let size = std::fs::metadata(rpath)
+                                                    .map(|m| m.len())
+                                                    .unwrap_or(0);
+                                                if trash::delete(rpath).is_ok() {
+                                                    trashed_count += 1;
+                                                    bytes_saved += size;
+                                                    index.remove_physical_copy(&hash, redundant);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                let _ = index.save();
+                                if trashed_count > 0 {
+                                    let mb = (bytes_saved as f64) / (1024.0 * 1024.0);
+                                    emit_snapshot(
+                                        &config,
+                                        &index,
+                                        Some(format!(
+                                            "Batch deduplication: moved {} duplicate(s) to trash (reclaimed {:.1} MB)",
+                                            trashed_count, mb
+                                        )),
+                                    );
+                                } else if !errors.is_empty() {
+                                    let _ = evt_tx.send(WorkerEvent::Error(errors.join("; ")));
+                                    egui_ctx.request_repaint();
+                                } else {
+                                    emit_snapshot(
+                                        &config,
+                                        &index,
+                                        Some("No redundant duplicates found to trash".to_string()),
+                                    );
                                 }
                             }
                         }

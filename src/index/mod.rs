@@ -198,6 +198,25 @@ impl DocumentIndex {
         }
     }
 
+    pub fn remove_physical_copy(&mut self, hash: &str, path_to_remove: &str) -> bool {
+        if let Some(pos) = self.items.iter().position(|i| i.hash == hash) {
+            let item = &mut self.items[pos];
+            let before = item.physical_paths.len();
+            item.physical_paths.retain(|p| p != path_to_remove);
+            if item.physical_paths.len() < before {
+                item.is_duplicate = item.physical_paths.len() > 1;
+                self.dirty = true;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn items_mut(&mut self) -> &mut Vec<IndexItem> {
+        self.dirty = true;
+        &mut self.items
+    }
+
     /// Remove entries whose files no longer exist on disk or live outside `workspace`.
     pub fn prune_missing_in_workspace(&mut self, workspace: &Path) -> usize {
         let base = resolve_workspace_path(workspace);

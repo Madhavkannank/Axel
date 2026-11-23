@@ -54,6 +54,7 @@ pub enum PanelAction {
     RevealFolderExternal(String),
     DeleteDocument { hash: String, delete_file: bool },
     TrashDuplicateFile { canonical_hash: String, trash_path: String },
+    TrashAllDuplicates,
     CloseInspector,
     CloseTelemetry,
     CycleDropDock(isize),
