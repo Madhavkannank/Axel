@@ -17,3 +17,6 @@ documents/
 .mypy_cache/
 .ruff_cache/
 *.log
+models/*.onnx
+models/*.rten
+models/*.bin

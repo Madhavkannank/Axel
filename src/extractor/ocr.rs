@@ -100,7 +100,7 @@ pub fn find_cli_ocr_binary() -> Option<String> {
     None
 }
 
-/// Find directory containing the < 20MB lightweight model weights (2.2MB det + 14.2MB rec)
+/// Find directory containing the < 20MB lightweight model weights (2.4MB det + 9.3MB rec)
 pub fn find_lightweight_model_dir() -> Option<PathBuf> {
     let mut search_dirs = Vec::new();
 
@@ -111,12 +111,13 @@ pub fn find_lightweight_model_dir() -> Option<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         search_dirs.push(home.join(".local/share/axel/models"));
         search_dirs.push(home.join(".axel/models"));
+        search_dirs.push(home.join(".cache/ocrs"));
     }
 
     for dir in search_dirs {
-        let det = dir.join("text-detection.rten");
-        let rec = dir.join("text-recognition.rten");
-        if det.exists() && rec.exists() {
+        let has_onnx = dir.join("text-detection.onnx").exists() && dir.join("text-recognition.onnx").exists();
+        let has_rten = dir.join("text-detection.rten").exists() && dir.join("text-recognition.rten").exists();
+        if has_onnx || has_rten {
             return Some(dir);
         }
     }
@@ -192,14 +193,21 @@ fn run_cli_worker_ocr(path: &Path) -> Result<String, String> {
     }
 }
 
-fn run_lightweight_model_ocr(path: &Path, _model_dir: &Path) -> Result<String, String> {
-    // If a companion runner binary exists or ocrs-cli is available, delegate to it
-    // so model weights are freed immediately upon task completion, keeping daemon RSS < 10MB
+fn run_lightweight_model_ocr(path: &Path, model_dir: &Path) -> Result<String, String> {
+    // Delegate to on-demand CLI worker with the < 20MB models so weights are freed immediately,
+    // keeping daemon resident memory strictly < 10MB RSS
     if let Some(cli) = find_cli_ocr_binary() {
-        let output = Command::new(cli)
-            .arg(path)
-            .output();
-        if let Ok(out) = output {
+        let det_onnx = model_dir.join("text-detection.onnx");
+        let rec_onnx = model_dir.join("text-recognition.onnx");
+
+        let mut cmd = Command::new(&cli);
+        if det_onnx.exists() && rec_onnx.exists() {
+            cmd.arg("--detect-model").arg(&det_onnx);
+            cmd.arg("--rec-model").arg(&rec_onnx);
+        }
+        cmd.arg(path);
+
+        if let Ok(out) = cmd.output() {
             if out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !text.is_empty() {
@@ -259,5 +267,16 @@ mod tests {
         assert!(text.contains("Lecture"));
         assert!(text.contains("Derivatives"));
         assert!(text.contains("Study"));
+    }
+
+    #[test]
+    fn test_extract_text_with_lightweight_model_or_fallback() {
+        let test_path = Path::new("/tmp/ocr_test.png");
+        if test_path.exists() {
+            let res = extract_text(test_path);
+            assert!(res.is_ok());
+            let text = res.unwrap();
+            assert!(text.contains("Calculus") || text.contains("Derivatives"));
+        }
     }
 }
