@@ -1,29 +1,20 @@
 use axel::ai::AiEngine;
-use axel::classifier::{KeywordExtractor, RuleClassifier};
+use axel::classifier::KeywordExtractor;
 use axel::config::Config;
 use axel::extractor::docx::strip_docx_xml;
 use axel::extractor::{detect_file_type, preprocess_text, FileType};
 use axel::index::{DocumentIndex, IndexItem};
 
-#[test]
-fn test_rule_classification() {
-    let classifier = RuleClassifier::new();
+#[tokio::test]
+async fn test_ai_document_analysis_pii_and_keywords() {
+    let mut config = Config::load();
+    config.groq_api_key = None; // Offline mode test
+    let ai = AiEngine::new(&config);
 
-    let (cat, conf) = classifier.classify("Tax Invoice #1024 GSTIN items qty total price paid");
-    assert_eq!(cat, "Invoice");
-    assert!(conf >= 0.3);
-
-    let (cat, conf) = classifier.classify("Patient medical prescription doctor dosage hospital clinic");
-    assert_eq!(cat, "Medical");
-    assert!(conf >= 0.3);
-
-    let (cat, conf) = classifier.classify("Candidate curriculum vitae developer engineer experience skills");
-    assert_eq!(cat, "Resume");
-    assert!(conf >= 0.3);
-
-    let (cat, conf) = classifier.classify("Government Aadhaar card UIDAI resident identity DOB");
-    assert_eq!(cat, "Government ID");
-    assert!(conf >= 0.3);
+    let doc = "Quarterly consulting invoice for client services. Billing amount: $4,500. Due in 30 days.";
+    let res = ai.analyze_document(doc, "invoice.txt", None).await;
+    assert_eq!(res.category, "General");
+    assert!(res.keywords.contains(&"invoice".to_string()) || res.keywords.contains(&"consulting".to_string()));
 }
 
 #[test]

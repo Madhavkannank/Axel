@@ -2,7 +2,6 @@ pub mod code;
 pub mod filter;
 pub mod keywords;
 pub mod privacy;
-pub mod rules;
 pub mod tfidf;
 
 pub use code::{extract_code_symbols, split_identifier, CodeSymbols};
@@ -12,6 +11,5 @@ pub use filter::{
 };
 pub use keywords::KeywordExtractor;
 pub use privacy::{is_high_risk_identity_document, redact_sensitive_pii, RedactionSummary};
-pub use rules::RuleClassifier;
 pub use tfidf::TfidfEngine;
 
