@@ -703,3 +703,48 @@ pub fn draw_icon_trash(p: &Painter, c: Pos2, s: f32, color: Color32) {
     p.line_segment([Pos2::new(c.x - w * 0.35, c.y - h * 0.6), Pos2::new(c.x - w * 0.30, c.y + h * 0.7)], st);
     p.line_segment([Pos2::new(c.x + w * 0.35, c.y - h * 0.6), Pos2::new(c.x + w * 0.30, c.y + h * 0.7)], st);
 }
+
+pub fn draw_icon_smart_view(p: &Painter, c: Pos2, s: f32, kind: &str, color: Color32) {
+    let st = Stroke::new(1.3, color);
+    match kind {
+        "all" => {
+            let w = s * 0.32;
+            for dy in [-0.22_f32, 0.0, 0.22] {
+                p.line_segment(
+                    [Pos2::new(c.x - w, c.y + s * dy), Pos2::new(c.x + w, c.y + s * dy)],
+                    st,
+                );
+            }
+        }
+        "duplicates" => {
+            let r1 = Rect::from_min_size(
+                Pos2::new(c.x - s * 0.34, c.y - s * 0.34),
+                Vec2::new(s * 0.44, s * 0.52),
+            );
+            let r2 = Rect::from_min_size(
+                Pos2::new(c.x - s * 0.12, c.y - s * 0.16),
+                Vec2::new(s * 0.44, s * 0.52),
+            );
+            p.rect_stroke(r1, CornerRadius::same(2), Stroke::new(1.1, color), StrokeKind::Inside);
+            p.rect_filled(r2, CornerRadius::same(2), with_alpha(color, 40));
+            p.rect_stroke(r2, CornerRadius::same(2), st, StrokeKind::Inside);
+        }
+        "scripts" | "code" => {
+            let dx = s * 0.28;
+            let dy = s * 0.24;
+            p.line_segment([Pos2::new(c.x - s * 0.08, c.y - dy), Pos2::new(c.x - dx, c.y)], st);
+            p.line_segment([Pos2::new(c.x - dx, c.y), Pos2::new(c.x - s * 0.08, c.y + dy)], st);
+            p.line_segment([Pos2::new(c.x + s * 0.08, c.y - dy), Pos2::new(c.x + dx, c.y)], st);
+            p.line_segment([Pos2::new(c.x + dx, c.y), Pos2::new(c.x + s * 0.08, c.y + dy)], st);
+        }
+        "documents" => {
+            draw_icon_file_type(p, c, s, "docx", color);
+        }
+        "media" => {
+            draw_icon_file_type(p, c, s, "image", color);
+        }
+        _ => {
+            p.circle_stroke(c, s * 0.28, st);
+        }
+    }
+}

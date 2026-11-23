@@ -2,15 +2,16 @@ use crate::desktop::chrome::{format_relative_time, PanelAction};
 use crate::desktop::galaxy::{format_bytes, truncate_label, GalaxyAction};
 use crate::desktop::theme::{
     accent_bright, accent_color, draw_icon_close, draw_icon_file_type, draw_icon_folder,
-    draw_icon_shield, draw_icon_trash, draw_icon_workstation, font_medium, font_mono, font_sans,
-    font_semibold, palette, with_alpha, ThemePalette,
+    draw_icon_search, draw_icon_shield, draw_icon_smart_view, draw_icon_trash,
+    draw_icon_workstation, font_medium, font_mono, font_sans, font_semibold, palette, with_alpha,
+    ThemePalette,
 };
 use crate::engine::{category_accent, DocumentDetail, GraphNode, GraphSnapshot, SystemStats};
 use crate::index::{build_virtual_tree, DocumentIndex, VirtualFolder};
 use chrono::Utc;
 use egui::{
     Align, Align2, Color32, CornerRadius, CursorIcon, Frame, Id, Layout, Margin, Pos2, Rect,
-    ScrollArea, Sense, Stroke, StrokeKind, Ui, Vec2,
+    ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -60,6 +61,7 @@ pub fn is_sensitive_item(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_workstation(
     ui: &mut Ui,
     rect: Rect,
@@ -71,6 +73,8 @@ pub fn render_workstation(
     search_highlight_hashes: &HashSet<String>,
     active_detail: Option<&DocumentDetail>,
     confirm_delete: &mut bool,
+    search_query: &str,
+    focus_search_requested: bool,
 ) -> (GalaxyAction, PanelAction) {
     let mut galaxy_action = GalaxyAction::None;
     let mut panel_action = PanelAction::None;
@@ -353,7 +357,8 @@ pub fn render_workstation(
                     let total_count = search_index.items().len().max(snapshot.nodes.len());
                     if render_smart_view_button(
                         ui,
-                        "≡ All Items",
+                        "all",
+                        "All Items",
                         total_count,
                         is_all,
                         p.indigo,
@@ -372,7 +377,8 @@ pub fn render_workstation(
                     let is_dup = active_category_filter == Some("Duplicates");
                     if render_smart_view_button(
                         ui,
-                        "• Duplicates",
+                        "duplicates",
+                        "Duplicates",
                         dup_count,
                         is_dup,
                         p.copper_bright,
@@ -400,7 +406,8 @@ pub fn render_workstation(
                     let is_scripts = active_category_filter == Some("User Scripts");
                     if render_smart_view_button(
                         ui,
-                        "</> User Scripts",
+                        "scripts",
+                        "User Scripts",
                         script_count,
                         is_scripts,
                         p.indigo_bright,
@@ -431,7 +438,8 @@ pub fn render_workstation(
                     let is_docs = active_category_filter == Some("Documents");
                     if render_smart_view_button(
                         ui,
-                        "📄 Documents",
+                        "documents",
+                        "Documents",
                         doc_count,
                         is_docs,
                         p.emerald,
@@ -460,7 +468,8 @@ pub fn render_workstation(
                     let is_media = active_category_filter == Some("Media");
                     if render_smart_view_button(
                         ui,
-                        "🖼 Media",
+                        "media",
+                        "Media",
                         media_count,
                         is_media,
                         p.copper,
@@ -514,34 +523,142 @@ pub fn render_workstation(
             ui.set_width(mid_w - 24.0);
             ui.set_height(total_h - 24.0);
 
-            // Column Header
-            ui.horizontal(|ui| {
-                ui.add_space(26.0);
-                ui.label(
-                    egui::RichText::new("FILE")
-                        .font(font_semibold(10.5))
-                        .color(p.ink_muted),
+            // 1. Integrated Search Bar for File Ledger
+            let (search_box_rect, _) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), 32.0),
+                Sense::hover(),
+            );
+            ui.painter().rect_filled(
+                search_box_rect,
+                CornerRadius::same(6),
+                p.bg_surface,
+            );
+            ui.painter().rect_stroke(
+                search_box_rect,
+                CornerRadius::same(6),
+                Stroke::new(1.0, p.border_subtle),
+                StrokeKind::Inside,
+            );
+
+            // Search icon
+            let ic_pos = Pos2::new(search_box_rect.left() + 14.0, search_box_rect.center().y);
+            draw_icon_search(ui.painter(), ic_pos, 13.0, p.ink_muted);
+
+            // Text Edit field
+            let mut search_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(Rect::from_min_size(
+                        Pos2::new(search_box_rect.left() + 28.0, search_box_rect.top() + 3.0),
+                        Vec2::new(search_box_rect.width() - 80.0, 26.0),
+                    ))
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+
+            let mut q_input = search_query.to_string();
+            let text_edit = TextEdit::singleline(&mut q_input)
+                .id(Id::unique("workstation_ledger_search_input"))
+                .hint_text("Search documents, keywords, or symbols... (Ctrl+K)")
+                .frame(Frame::NONE)
+                .font(font_medium(11.5))
+                .text_color(p.ink_primary)
+                .margin(Margin::ZERO);
+
+            let response = search_ui.add(text_edit);
+            if focus_search_requested {
+                response.request_focus();
+            }
+            if response.changed() {
+                panel_action = PanelAction::SearchQueryChanged(q_input);
+            }
+
+            // Clear button or shortcut badge
+            if !search_query.is_empty() {
+                let clear_rect = Rect::from_center_size(
+                    Pos2::new(search_box_rect.right() - 16.0, search_box_rect.center().y),
+                    Vec2::splat(16.0),
                 );
-                ui.add_space(110.0);
-                ui.label(
-                    egui::RichText::new("CATEGORY / VIRTUAL PATH")
-                        .font(font_semibold(10.5))
-                        .color(p.ink_muted),
+                let clear_resp = ui.interact(clear_rect, Id::unique("workstation_search_clear"), Sense::click());
+                if clear_resp.hovered() {
+                    ui.painter().circle_filled(clear_rect.center(), 8.0, p.bg_surface_hover);
+                }
+                draw_icon_close(ui.painter(), clear_rect.center(), 10.0, p.ink_muted);
+                if clear_resp.clicked() {
+                    panel_action = PanelAction::SearchQueryChanged(String::new());
+                }
+            } else {
+                let badge_rect = Rect::from_center_size(
+                    Pos2::new(search_box_rect.right() - 28.0, search_box_rect.center().y),
+                    Vec2::new(42.0, 16.0),
                 );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new("SIZE")
-                            .font(font_semibold(10.5))
-                            .color(p.ink_muted),
-                    );
-                    ui.add_space(60.0);
-                    ui.label(
-                        egui::RichText::new("SYMBOLS / KEYWORDS")
-                            .font(font_semibold(10.5))
-                            .color(p.ink_muted),
-                    );
-                });
-            });
+                ui.painter().rect_filled(badge_rect, CornerRadius::same(3), p.bg_chrome);
+                ui.painter().text(
+                    badge_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "Ctrl+K",
+                    font_mono(9.5),
+                    p.ink_muted,
+                );
+            }
+
+            ui.add_space(8.0);
+
+            // 2. Proportional Dynamic Column Header
+            let (h_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+            let h_w = h_rect.width();
+            let h_left = h_rect.left();
+            let h_right = h_rect.right();
+            let h_y = h_rect.center().y;
+
+            let file_col_w = (h_w * 0.28).clamp(140.0, 240.0);
+            let file_col_x = h_left + 28.0;
+            let cat_col_x = file_col_x + file_col_w + 12.0;
+
+            let size_col_w = 60.0;
+            let size_col_x = h_right - 8.0; // right-aligned text
+            let sym_col_right = size_col_x - size_col_w - 14.0; // right-aligned text
+
+            let cat_label_header = if sym_col_right - cat_col_x > 260.0 {
+                "CATEGORY / VIRTUAL PATH"
+            } else if sym_col_right - cat_col_x > 200.0 {
+                "CATEGORY / PATH"
+            } else {
+                "CATEGORY"
+            };
+            let sym_label_header = if sym_col_right - cat_col_x > 200.0 {
+                "SYMBOLS / KEYWORDS"
+            } else {
+                "KEYWORDS / SYMBOLS"
+            };
+
+            ui.painter().text(
+                Pos2::new(file_col_x, h_y),
+                Align2::LEFT_CENTER,
+                "FILE",
+                font_semibold(10.5),
+                p.ink_muted,
+            );
+            ui.painter().text(
+                Pos2::new(cat_col_x, h_y),
+                Align2::LEFT_CENTER,
+                cat_label_header,
+                font_semibold(10.5),
+                p.ink_muted,
+            );
+            ui.painter().text(
+                Pos2::new(sym_col_right, h_y),
+                Align2::RIGHT_CENTER,
+                sym_label_header,
+                font_semibold(10.5),
+                p.ink_muted,
+            );
+            ui.painter().text(
+                Pos2::new(size_col_x, h_y),
+                Align2::RIGHT_CENTER,
+                "SIZE",
+                font_semibold(10.5),
+                p.ink_muted,
+            );
+
             ui.add_space(4.0);
             ui.separator();
             ui.add_space(4.0);
@@ -627,10 +744,14 @@ pub fn render_workstation(
                         }
                     }
 
-                    if !search_highlight_hashes.is_empty()
-                        && !search_highlight_hashes.contains(&n.hash)
-                    {
-                        return false;
+                    if !search_query.trim().is_empty() {
+                        let q = search_query.to_lowercase();
+                        let matches_name = n.file.to_lowercase().contains(&q);
+                        let matches_cat = n.category.to_lowercase().contains(&q);
+                        let matches_semantic = search_highlight_hashes.contains(&n.hash);
+                        if !matches_name && !matches_cat && !matches_semantic {
+                            return false;
+                        }
                     }
 
                     true
@@ -724,8 +845,21 @@ pub fn render_workstation(
                                 .unwrap_or(false);
                             let is_shielded = is_sensitive && !is_revealed;
 
+                            let row_w = row_rect.width();
+                            let row_left = row_rect.left();
+                            let row_right = row_rect.right();
+                            let row_y = row_rect.center().y;
+
+                            let file_col_w = (row_w * 0.28).clamp(140.0, 240.0);
+                            let file_col_x = row_left + 28.0;
+                            let cat_col_x = file_col_x + file_col_w + 12.0;
+
+                            let size_col_w = 60.0;
+                            let size_col_x = row_right - 8.0; // right-aligned text
+                            let sym_col_right = size_col_x - size_col_w - 14.0; // right-aligned text
+
                             // Icon
-                            let ic_center = Pos2::new(row_rect.left() + 14.0, row_rect.center().y);
+                            let ic_center = Pos2::new(row_left + 14.0, row_y);
                             if is_shielded {
                                 draw_icon_shield(ui.painter(), ic_center, 13.0, p.copper_bright);
                             } else {
@@ -738,22 +872,30 @@ pub fn render_workstation(
                                 );
                             }
 
+                            // Duplicate Badge
+                            let is_dup = search_index
+                                .find_by_hash(&node.hash)
+                                .map(|i| i.is_duplicate || i.physical_paths.len() > 1)
+                                .unwrap_or(false);
+
                             // File Name
-                            let name_pos = Pos2::new(row_rect.left() + 28.0, row_rect.center().y);
+                            let name_max_w = if is_dup { file_col_w - 38.0 } else { file_col_w - 6.0 };
+                            let max_chars = ((name_max_w / 7.2) as usize).clamp(8, 30);
                             let display_name = if is_shielded {
                                 let ext = Path::new(&node.file)
                                     .extension()
                                     .and_then(|s| s.to_str())
                                     .unwrap_or("doc");
-                                format!("🔒 ••••••••••.{}", ext)
+                                format!("••••••••••.{}", ext)
                             } else {
-                                truncate_label(&node.file, 22)
+                                truncate_label(&node.file, max_chars)
                             };
+
                             ui.painter().text(
-                                name_pos,
+                                Pos2::new(file_col_x, row_y),
                                 Align2::LEFT_CENTER,
                                 display_name,
-                                font_medium(12.0),
+                                font_medium(11.5),
                                 if is_shielded {
                                     p.copper_bright
                                 } else if is_selected {
@@ -763,64 +905,49 @@ pub fn render_workstation(
                                 },
                             );
 
-                            // Duplicate Badge
-                            let is_dup = search_index
-                                .find_by_hash(&node.hash)
-                                .map(|i| i.is_duplicate || i.physical_paths.len() > 1)
-                                .unwrap_or(false);
                             if is_dup {
-                                let badge_rect = Rect::from_min_size(
-                                    Pos2::new(row_rect.left() + 180.0, row_rect.center().y - 8.0),
-                                    Vec2::new(42.0, 16.0),
+                                let badge_rect = Rect::from_center_size(
+                                    Pos2::new(file_col_x + file_col_w - 18.0, row_y),
+                                    Vec2::new(32.0, 15.0),
                                 );
                                 ui.painter().rect_filled(
                                     badge_rect,
-                                    CornerRadius::same(4),
+                                    CornerRadius::same(3),
                                     with_alpha(p.copper_bright, 45),
                                 );
                                 ui.painter().text(
                                     badge_rect.center(),
                                     Align2::CENTER_CENTER,
-                                    "• DUP",
-                                    font_semibold(9.5),
+                                    "DUP",
+                                    font_semibold(9.0),
                                     p.copper_bright,
                                 );
                             }
 
                             // Category / Virtual Path
-                            let cat_pos = Pos2::new(row_rect.left() + 235.0, row_rect.center().y);
+                            let cat_max_w = (sym_col_right - 130.0 - cat_col_x).max(40.0);
+                            let cat_chars = ((cat_max_w / 7.0) as usize).clamp(6, 32);
                             let accent_name = category_accent(&node.category);
                             let cat_col = if is_shielded { p.copper } else { accent_color(accent_name) };
                             let cat_label = if is_shielded {
-                                "[🔒 Shielded Identity]".to_string()
+                                "[Shielded Identity]".to_string()
                             } else {
-                                truncate_label(&node.category, 24)
+                                truncate_label(&node.category, cat_chars)
                             };
                             ui.painter().text(
-                                cat_pos,
+                                Pos2::new(cat_col_x, row_y),
                                 Align2::LEFT_CENTER,
                                 cat_label,
                                 font_sans(11.0),
                                 cat_col,
                             );
 
-                            // Right-aligned Size
-                            let right_end = row_rect.right() - 8.0;
-                            let size_str = format_bytes(node.size_bytes);
-                            ui.painter().text(
-                                Pos2::new(right_end, row_rect.center().y),
-                                Align2::RIGHT_CENTER,
-                                size_str,
-                                font_mono(10.5),
-                                p.ink_muted,
-                            );
-
                             // Symbols / Keywords
                             if is_shielded {
                                 ui.painter().text(
-                                    Pos2::new(right_end - 85.0, row_rect.center().y),
+                                    Pos2::new(sym_col_right, row_y),
                                     Align2::RIGHT_CENTER,
-                                    "[🔒 Masked]",
+                                    "[Masked]",
                                     font_mono(10.0),
                                     p.copper_bright,
                                 );
@@ -834,9 +961,9 @@ pub fn render_workstation(
                                         .collect::<Vec<_>>()
                                         .join(" ");
                                     ui.painter().text(
-                                        Pos2::new(right_end - 85.0, row_rect.center().y),
+                                        Pos2::new(sym_col_right, row_y),
                                         Align2::RIGHT_CENTER,
-                                        truncate_label(&syms, 22),
+                                        truncate_label(&syms, 18),
                                         font_mono(10.0),
                                         p.ink_muted,
                                     );
@@ -849,14 +976,24 @@ pub fn render_workstation(
                                         .collect::<Vec<_>>()
                                         .join(" ");
                                     ui.painter().text(
-                                        Pos2::new(right_end - 85.0, row_rect.center().y),
+                                        Pos2::new(sym_col_right, row_y),
                                         Align2::RIGHT_CENTER,
-                                        truncate_label(&kws, 22),
+                                        truncate_label(&kws, 18),
                                         font_sans(10.0),
                                         p.ink_muted,
                                     );
                                 }
                             }
+
+                            // Right-aligned Size
+                            let size_str = format_bytes(node.size_bytes);
+                            ui.painter().text(
+                                Pos2::new(size_col_x, row_y),
+                                Align2::RIGHT_CENTER,
+                                size_str,
+                                font_mono(10.5),
+                                p.ink_muted,
+                            );
 
                             if row_resp.clicked() {
                                 galaxy_action = GalaxyAction::SelectNode(node.hash.clone());
@@ -911,13 +1048,14 @@ pub fn render_workstation(
 
 fn render_smart_view_button(
     ui: &mut Ui,
+    icon_kind: &str,
     label: &str,
     count: usize,
     is_active: bool,
     accent: Color32,
     p: &ThemePalette,
 ) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
     let bg = if is_active {
         with_alpha(accent, 42)
     } else if resp.hovered() {
@@ -926,13 +1064,44 @@ fn render_smart_view_button(
         Color32::TRANSPARENT
     };
     ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
+    if is_active {
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(6),
+            Stroke::new(1.0, with_alpha(accent, 140)),
+            StrokeKind::Inside,
+        );
+    }
+
+    // Procedural vector icon
+    let ic_center = Pos2::new(rect.left() + 14.0, rect.center().y);
+    draw_icon_smart_view(
+        ui.painter(),
+        ic_center,
+        14.0,
+        icon_kind,
+        if is_active { accent } else { p.ink_muted },
+    );
+
+    // Label
     ui.painter().text(
-        Pos2::new(rect.left() + 8.0, rect.center().y),
+        Pos2::new(rect.left() + 28.0, rect.center().y),
         Align2::LEFT_CENTER,
-        format!("{} ({})", label, count),
-        font_medium(11.0),
+        label,
+        font_medium(11.5),
         if is_active { accent } else { p.ink_primary },
     );
+
+    // Right-aligned Count Badge
+    let count_str = format!("{}", count);
+    ui.painter().text(
+        Pos2::new(rect.right() - 8.0, rect.center().y),
+        Align2::RIGHT_CENTER,
+        count_str,
+        font_mono(10.5),
+        if is_active { accent } else { p.ink_muted },
+    );
+
     resp.clicked()
 }
 
@@ -1240,7 +1409,7 @@ fn render_inspector_content(
                             ui.painter().text(
                                 rem_rect.center(),
                                 Align2::CENTER_CENTER,
-                                format!("🔒 Hide ({}s)", remaining),
+                                format!("Hide ({}s)", remaining),
                                 font_medium(9.5),
                                 if rem_resp.hovered() { Color32::WHITE } else { p.copper_bright },
                             );
@@ -1278,7 +1447,7 @@ fn render_inspector_content(
                             draw_icon_shield(ui.painter(), sh_rect.center(), 20.0, p.copper_bright);
                             ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new("🔒 Privacy Shield Active")
+                                egui::RichText::new("Privacy Shield Active")
                                     .font(font_semibold(11.5))
                                     .color(p.copper_bright),
                             );
@@ -1298,7 +1467,7 @@ fn render_inspector_content(
                             ui.painter().text(
                                 rev_rect.center(),
                                 Align2::CENTER_CENTER,
-                                "👁 Click to Reveal",
+                                "Click to Reveal",
                                 font_medium(10.0),
                                 p.ink_primary,
                             );
@@ -1454,7 +1623,7 @@ fn render_inspector_empty_state(
                         ui.painter().text(
                             b_rect.center(),
                             Align2::CENTER_CENTER,
-                            "⚡ Trash All Duplicates (Safe)",
+                            "Trash All Duplicates (Safe)",
                             font_medium(10.5),
                             text_col,
                         );
@@ -1583,9 +1752,9 @@ fn render_daemon_status_card(ui: &mut Ui, stats: &SystemStats, p: &ThemePalette)
 
     // Line 3: AI Intelligence Engine status
     let (engine_label, engine_color) = if stats.groq_enabled {
-        ("⚡ Groq LLM (Active)", p.indigo_bright)
+        ("Groq LLM (Active)", p.indigo_bright)
     } else {
-        ("🧠 TF-IDF Offline Engine", p.copper)
+        ("TF-IDF Offline Engine", p.copper)
     };
     ui.painter().text(
         Pos2::new(left_pad, top_pad + 46.0),

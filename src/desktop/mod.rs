@@ -162,7 +162,7 @@ impl AxelDesktopApp {
             layout: GalaxyLayout::default(),
             camera: GalaxyCamera::default(),
             view_mode: ViewMode::Workstation,
-            show_activity: true,
+            show_activity: false,
             show_telemetry: false,
             is_maximized: false,
             selected_hub: None,
@@ -681,7 +681,10 @@ impl eframe::App for AxelDesktopApp {
                             &self.search_highlight_hashes,
                             self.active_detail.as_ref(),
                             &mut self.confirm_delete,
+                            &self.search_query,
+                            self.focus_search_requested,
                         );
+                        self.focus_search_requested = false;
                         merge_action(&mut pending_action, p_act);
                         g_act
                     }
@@ -752,30 +755,32 @@ impl eframe::App for AxelDesktopApp {
                 );
             }
 
-            merge_action(
-                &mut pending_action,
-                render_semantic_search_overlay(
-                    &ctx,
-                    canvas_rect,
-                    &mut self.search_query,
-                    &mut self.focus_search_requested,
-                    &mut self.search_popover_open,
-                    &self.search_results,
-                    &self.snapshot.hubs,
-                    self.active_category_filter.as_deref(),
-                ),
-            );
+            if self.view_mode != ViewMode::Workstation {
+                merge_action(
+                    &mut pending_action,
+                    render_semantic_search_overlay(
+                        &ctx,
+                        canvas_rect,
+                        &mut self.search_query,
+                        &mut self.focus_search_requested,
+                        &mut self.search_popover_open,
+                        &self.search_results,
+                        &self.snapshot.hubs,
+                        self.active_category_filter.as_deref(),
+                    ),
+                );
 
-            merge_action(
-                &mut pending_action,
-                render_drop_dock_overlay(
-                    &ctx,
-                    canvas_rect,
-                    &self.snapshot.nodes,
-                    self.dock_index,
-                    is_file_drag_hovering,
-                ),
-            );
+                merge_action(
+                    &mut pending_action,
+                    render_drop_dock_overlay(
+                        &ctx,
+                        canvas_rect,
+                        &self.snapshot.nodes,
+                        self.dock_index,
+                        is_file_drag_hovering,
+                    ),
+                );
+            }
 
             if let Some(ref detail) = self.active_detail {
                 if self.view_mode != ViewMode::Workstation {
