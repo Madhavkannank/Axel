@@ -218,3 +218,26 @@ pub fn record_recent_workspace(dir: &Path) -> Vec<PathBuf> {
     }
     list
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkstationLayoutState {
+    pub left_w: f32,
+    pub right_w: f32,
+}
+
+pub fn load_workstation_layout() -> Option<WorkstationLayoutState> {
+    let path = app_data_dir().join("workstation_layout.json");
+    if let Ok(content) = std::fs::read_to_string(path) {
+        serde_json::from_str(&content).ok()
+    } else {
+        None
+    }
+}
+
+pub fn save_workstation_layout(state: &WorkstationLayoutState) {
+    let data_dir = app_data_dir();
+    let _ = std::fs::create_dir_all(&data_dir);
+    if let Ok(json) = serde_json::to_string(state) {
+        let _ = std::fs::write(data_dir.join("workstation_layout.json"), json);
+    }
+}

@@ -64,8 +64,15 @@ impl GroqClient {
         let (sanitized_text, _) = crate::classifier::redact_sensitive_pii(text);
         let text = sanitized_text.as_str();
 
-        let kws_context = if !candidate_kws.is_empty() {
-            format!("\nExtracted candidate keywords: {}\n", candidate_kws.join(", "))
+        let filtered_kws: Vec<String> = candidate_kws
+            .iter()
+            .filter(|k| !k.to_lowercase().contains("redacted"))
+            .map(|k| crate::classifier::redact_sensitive_pii(k).0)
+            .filter(|k| !k.trim().is_empty())
+            .collect();
+
+        let kws_context = if !filtered_kws.is_empty() {
+            format!("\nExtracted candidate keywords: {}\n", filtered_kws.join(", "))
         } else {
             String::new()
         };

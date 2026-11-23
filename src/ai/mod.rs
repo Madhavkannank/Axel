@@ -42,36 +42,43 @@ impl AiEngine {
             text.to_string()
         };
 
-        // Step 1: Statistical keywords via KeywordExtractor & TF-IDF
-        let mut candidate_kws = self.keywords.extract(&effective_text, self.max_keywords);
+        // Step 1: Privacy Shield - redact sensitive personal identifiers
+        // (Aadhaar, PAN, SSN, Credit Cards, personal names, DOB)
+        let (sanitized_text, redaction_summary) = redact_sensitive_pii(&effective_text);
+
+        // Step 2: Statistical keywords via KeywordExtractor & TF-IDF on sanitized text
+        let mut candidate_kws = self.keywords.extract(&sanitized_text, self.max_keywords);
         if let Some(tfidf_kws) = suggested_tfidf_kws {
             for kw in tfidf_kws {
                 let clean = kw.to_lowercase();
-                if !candidate_kws.contains(&clean) {
+                if !clean.contains("redacted") && !candidate_kws.contains(&clean) {
                     candidate_kws.push(clean);
                 }
             }
         }
 
-        // Step 2: Privacy Shield + Groq Semantic Discovery Layer
-        // All sensitive personal identifiers (Aadhaar, PAN, SSN, Credit Cards, names, DOB)
-        // are thoroughly redacted prior to sending context to the cloud LLM.
-        let (sanitized_text, redaction_summary) = redact_sensitive_pii(&effective_text);
+        // Step 3: Privacy boundary check. High-risk government identity documents
+        // (Aadhaar, PAN, SSN, Passport, etc.) are strictly kept local and NEVER
+        // transmitted to external cloud LLM APIs.
+        let is_sensitive_identity = redaction_summary.has_sensitive_id()
+            || is_high_risk_identity_document(&effective_text, file_name);
 
-        if let Some(ref client) = self.groq {
-            let prompt_text = if !sanitized_text.trim().is_empty() {
-                sanitized_text.clone()
-            } else {
-                format!("File name: {file_name}. Infer category, keywords, and virtual_paths.")
-            };
+        if !is_sensitive_identity {
+            if let Some(ref client) = self.groq {
+                let prompt_text = if !sanitized_text.trim().is_empty() {
+                    sanitized_text.clone()
+                } else {
+                    format!("File name: {file_name}. Infer category, keywords, and virtual_paths.")
+                };
 
-            if let Some(mut llm_res) = client.categorize(&prompt_text, &candidate_kws).await {
-                llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, text, self.max_keywords);
-                return llm_res;
+                if let Some(mut llm_res) = client.categorize(&prompt_text, &candidate_kws).await {
+                    llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, &sanitized_text, self.max_keywords);
+                    return llm_res;
+                }
             }
         }
 
-        // Step 3: Dynamic fallback when Groq is offline or not configured
+        // Step 4: Dynamic fallback when Groq is offline, not configured, or document is sensitive identity
         let (category, fallback_kws) = if redaction_summary.has_sensitive_id()
             || is_high_risk_identity_document(&effective_text, file_name)
         {

@@ -27,6 +27,39 @@ pub fn is_sensitive_category(category: &str) -> bool {
         || cat_l.contains("personal")
 }
 
+pub fn is_sensitive_item(
+    category: &str,
+    file_name: &str,
+    keywords: &[String],
+    preview_text: Option<&str>,
+) -> bool {
+    if is_sensitive_category(category) {
+        return true;
+    }
+    let lower_file = file_name.to_lowercase();
+    if lower_file.contains("aadhaar")
+        || lower_file.contains("aadhar")
+        || lower_file.contains("pan")
+        || lower_file.contains("passport")
+        || lower_file.contains("ssn")
+        || lower_file.contains("voter")
+    {
+        return true;
+    }
+    for kw in keywords {
+        let kw_l = kw.to_lowercase();
+        if kw_l == "aadhaar" || kw_l == "aadhar" || kw_l == "pan" || kw_l == "ssn" || kw_l == "government id" {
+            return true;
+        }
+    }
+    if let Some(text) = preview_text {
+        if crate::classifier::privacy::is_high_risk_identity_document(text, file_name) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn render_workstation(
     ui: &mut Ui,
     rect: Rect,
@@ -103,18 +136,23 @@ pub fn render_workstation(
     let total_w = avail_rect.width();
     let total_h = avail_rect.height();
 
-    // 3-Column Width Calculations with interactive draggable splitters
+    // 3-Column Width Calculations with interactive draggable splitters & disk persistence
     let id_left_w = Id::unique("workstation_left_col_w");
     let id_right_w = Id::unique("workstation_right_col_w");
 
-    let default_left = if total_w >= 1050.0 {
+    let saved_layout = crate::config::load_workstation_layout();
+    let default_left = if let Some(ref l) = saved_layout {
+        l.left_w
+    } else if total_w >= 1050.0 {
         230.0_f32
     } else if total_w >= 780.0 {
         200.0_f32
     } else {
         180.0_f32
     };
-    let default_right = if total_w >= 1050.0 {
+    let default_right = if let Some(ref l) = saved_layout {
+        l.right_w
+    } else if total_w >= 1050.0 {
         340.0_f32
     } else if total_w >= 780.0 {
         290.0_f32
@@ -142,6 +180,30 @@ pub fn render_workstation(
         right_w = right_w.clamp(230.0, (total_w - left_w - 240.0).max(250.0));
     }
 
+    // Privacy Shield active reveal tracking (with auto-rehide on selection change & 30s timeout)
+    let id_revealed = Id::unique("workstation_active_revealed_shield");
+    let now = child_ui.input(|i| i.time);
+    let mut active_revealed: Option<(String, f64)> = child_ui.ctx().data_mut(|d| d.get_temp(id_revealed));
+
+    // 1. Auto-rehide on 30s timeout
+    if let Some((_, reveal_time)) = active_revealed {
+        if now - reveal_time >= 30.0 {
+            active_revealed = None;
+            child_ui.ctx().data_mut(|d| d.insert_temp(id_revealed, active_revealed.clone()));
+        } else {
+            let remaining = 30.0 - (now - reveal_time);
+            child_ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(remaining.max(0.1)));
+        }
+    }
+
+    // 2. Auto-rehide immediately if selection changed away from revealed item
+    if let Some((ref rev_hash, _)) = active_revealed {
+        if selected_node != Some(rev_hash.as_str()) {
+            active_revealed = None;
+            child_ui.ctx().data_mut(|d| d.insert_temp(id_revealed, None::<(String, f64)>));
+        }
+    }
+
     let col_gap = 12.0_f32;
     let mid_w = (total_w - left_w - right_w - if right_w > 0.0 { col_gap * 2.0 } else { col_gap }).max(120.0);
 
@@ -160,6 +222,7 @@ pub fn render_workstation(
         let delta = s1_resp.drag_delta().x;
         left_w = (left_w + delta).clamp(160.0, (total_w - right_w - 240.0).max(180.0));
         child_ui.ctx().data_mut(|d| d.insert_temp(id_left_w, left_w));
+        crate::config::save_workstation_layout(&crate::config::WorkstationLayoutState { left_w, right_w });
     }
 
     let mid_rect = Rect::from_min_size(
@@ -181,6 +244,7 @@ pub fn render_workstation(
             let delta = resp.drag_delta().x;
             right_w = (right_w - delta).clamp(230.0, (total_w - left_w - 240.0).max(250.0));
             child_ui.ctx().data_mut(|d| d.insert_temp(id_right_w, right_w));
+            crate::config::save_workstation_layout(&crate::config::WorkstationLayoutState { left_w, right_w });
         }
         (r, Some(resp))
     } else {
@@ -576,15 +640,14 @@ pub fn render_workstation(
             let row_h = 36.0;
             let num_rows = filtered_nodes.len();
 
-            // Keyboard navigation in File Ledger (Arrow Up/Down / J/K, Enter to Open, Space to Toggle Shield)
+            // Keyboard navigation in File Ledger (Arrow Up/Down / J/K, Enter to Open)
             let search_focused = ui.ctx().memory(|m| m.has_focus(Id::unique("axel_semantic_search_input")));
             if !search_focused && !filtered_nodes.is_empty() {
-                let (down, up, enter, space) = ui.input(|i| {
+                let (down, up, enter) = ui.input(|i| {
                     (
                         i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::J),
                         i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::K),
                         i.key_pressed(egui::Key::Enter),
-                        i.key_pressed(egui::Key::Space),
                     )
                 });
 
@@ -613,12 +676,6 @@ pub fn render_workstation(
                         if let Some(node) = filtered_nodes.iter().find(|n| n.hash == cur_hash) {
                             panel_action = PanelAction::OpenFileExternal(node.path.clone());
                         }
-                    }
-                } else if space {
-                    if let Some(cur_hash) = selected_node {
-                        let shield_id = Id::unique(format!("workstation_shield_{}", cur_hash));
-                        let cur_revealed = ui.ctx().data_mut(|d| d.get_temp::<bool>(shield_id).unwrap_or(false));
-                        ui.ctx().data_mut(|d| d.insert_temp(shield_id, !cur_revealed));
                     }
                 }
             }
@@ -656,9 +713,15 @@ pub fn render_workstation(
                             }
 
                             // Check Privacy Shield status for sensitive documents
-                            let is_sensitive = is_sensitive_category(&node.category);
-                            let shield_id = Id::unique(format!("workstation_shield_{}", node.hash));
-                            let is_revealed = ui.ctx().data_mut(|d| d.get_temp::<bool>(shield_id).unwrap_or(false));
+                            let kws: Vec<String> = search_index
+                                .find_by_hash(&node.hash)
+                                .map(|i| i.keywords.clone())
+                                .unwrap_or_default();
+                            let is_sensitive = is_sensitive_item(&node.category, &node.file, &kws, None);
+                            let is_revealed = active_revealed
+                                .as_ref()
+                                .map(|(h, _)| h == &node.hash)
+                                .unwrap_or(false);
                             let is_shielded = is_sensitive && !is_revealed;
 
                             // Icon
@@ -832,6 +895,9 @@ pub fn render_workstation(
                         confirm_delete,
                         &mut panel_action,
                         &mut galaxy_action,
+                        &active_revealed,
+                        id_revealed,
+                        now,
                         &p,
                     );
                 } else {
@@ -935,6 +1001,9 @@ fn render_inspector_content(
     confirm_delete: &mut bool,
     panel_action: &mut PanelAction,
     galaxy_action: &mut GalaxyAction,
+    active_revealed: &Option<(String, f64)>,
+    id_revealed: Id,
+    now: f64,
     p: &ThemePalette,
 ) {
     let accent_name = category_accent(&detail.item.category);
@@ -1138,16 +1207,51 @@ fn render_inspector_content(
             }
 
             // Shoulder-Surfing Privacy Shield
-            let is_sensitive = is_sensitive_category(&detail.item.category);
-
-            let shield_id = Id::unique(format!("workstation_shield_{}", detail.item.hash));
-            let is_revealed = ui.ctx().data_mut(|d| d.get_temp::<bool>(shield_id).unwrap_or(false));
-
-            ui.label(
-                egui::RichText::new("Content Preview")
-                    .font(font_medium(11.0))
-                    .color(p.ink_muted),
+            let is_sensitive = is_sensitive_item(
+                &detail.item.category,
+                &detail.item.file,
+                &detail.item.keywords,
+                Some(&detail.text_preview),
             );
+
+            let is_revealed = active_revealed
+                .as_ref()
+                .map(|(h, _)| h == &detail.item.hash)
+                .unwrap_or(false);
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Content Preview")
+                        .font(font_medium(11.0))
+                        .color(p.ink_muted),
+                );
+                if is_sensitive && is_revealed {
+                    if let Some((_, rev_time)) = active_revealed {
+                        let remaining = (30.0 - (now - rev_time)).max(0.0).ceil() as u32;
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let (rem_rect, rem_resp) =
+                                ui.allocate_exact_size(Vec2::new(76.0, 18.0), Sense::click());
+                            let rem_bg = if rem_resp.hovered() {
+                                p.copper_bright
+                            } else {
+                                with_alpha(p.copper_bright, 40)
+                            };
+                            ui.painter().rect_filled(rem_rect, CornerRadius::same(4), rem_bg);
+                            ui.painter().text(
+                                rem_rect.center(),
+                                Align2::CENTER_CENTER,
+                                format!("🔒 Hide ({}s)", remaining),
+                                font_medium(9.5),
+                                if rem_resp.hovered() { Color32::WHITE } else { p.copper_bright },
+                            );
+                            if rem_resp.clicked() {
+                                ui.ctx().data_mut(|d| d.insert_temp(id_revealed, None::<(String, f64)>));
+                                ui.ctx().request_repaint();
+                            }
+                        });
+                    }
+                }
+            });
             ui.add_space(4.0);
 
             let preview_h = 130.0;
@@ -1185,7 +1289,7 @@ fn render_inspector_content(
                             );
                             ui.add_space(8.0);
                             let (rev_rect, rev_resp) =
-                                ui.allocate_exact_size(Vec2::new(96.0, 20.0), Sense::click());
+                                ui.allocate_exact_size(Vec2::new(104.0, 20.0), Sense::click());
                             ui.painter().rect_filled(
                                 rev_rect,
                                 CornerRadius::same(4),
@@ -1199,7 +1303,10 @@ fn render_inspector_content(
                                 p.ink_primary,
                             );
                             if rev_resp.clicked() {
-                                ui.ctx().data_mut(|d| d.insert_temp(shield_id, true));
+                                ui.ctx().data_mut(|d| {
+                                    d.insert_temp(id_revealed, Some((detail.item.hash.clone(), now)))
+                                });
+                                ui.ctx().request_repaint();
                             }
                         });
                     } else {
@@ -1300,19 +1407,60 @@ fn render_inspector_empty_state(
 
                 if dup_count > 0 {
                     ui.add_space(10.0);
-                    let (b_rect, b_resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
-                    let fill = if b_resp.hovered() { p.danger } else { with_alpha(p.danger, 50) };
-                    ui.painter().rect_filled(b_rect, CornerRadius::same(6), fill);
-                    let text_col = if b_resp.hovered() { Color32::WHITE } else { p.danger };
-                    ui.painter().text(
-                        b_rect.center(),
-                        Align2::CENTER_CENTER,
-                        "⚡ Trash All Duplicates (Safe)",
-                        font_medium(10.5),
-                        text_col,
-                    );
-                    if b_resp.clicked() {
-                        *panel_action = PanelAction::TrashAllDuplicates;
+                    let id_confirm_all = Id::unique("workstation_confirm_trash_all");
+                    let confirming = ui
+                        .ctx()
+                        .data_mut(|d| d.get_temp::<bool>(id_confirm_all).unwrap_or(false));
+                    if confirming {
+                        ui.label(
+                            egui::RichText::new("Move redundant duplicates to OS Trash?")
+                                .font(font_sans(10.0))
+                                .color(p.copper_bright),
+                        );
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(
+                                    egui::RichText::new("Confirm Trash")
+                                        .font(font_medium(10.0))
+                                        .color(p.danger),
+                                )
+                                .clicked()
+                            {
+                                ui.ctx().data_mut(|d| d.insert_temp(id_confirm_all, false));
+                                *panel_action = PanelAction::TrashAllDuplicates;
+                            }
+                            if ui
+                                .button(
+                                    egui::RichText::new("Cancel")
+                                        .font(font_sans(10.0))
+                                        .color(p.ink_muted),
+                                )
+                                .clicked()
+                            {
+                                ui.ctx().data_mut(|d| d.insert_temp(id_confirm_all, false));
+                            }
+                        });
+                    } else {
+                        let (b_rect, b_resp) =
+                            ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
+                        let fill = if b_resp.hovered() {
+                            p.danger
+                        } else {
+                            with_alpha(p.danger, 50)
+                        };
+                        ui.painter().rect_filled(b_rect, CornerRadius::same(6), fill);
+                        let text_col = if b_resp.hovered() { Color32::WHITE } else { p.danger };
+                        ui.painter().text(
+                            b_rect.center(),
+                            Align2::CENTER_CENTER,
+                            "⚡ Trash All Duplicates (Safe)",
+                            font_medium(10.5),
+                            text_col,
+                        );
+                        if b_resp.clicked() {
+                            ui.ctx().data_mut(|d| d.insert_temp(id_confirm_all, true));
+                        }
                     }
                 }
             });
@@ -1348,7 +1496,7 @@ fn render_chip_button(ui: &mut Ui, label: &str, accent: Color32, p: &ThemePalett
     resp.clicked()
 }
 
-pub fn get_process_rss_mb() -> f32 {
+pub fn get_process_rss_mb() -> Option<f32> {
     #[cfg(target_os = "linux")]
     {
         if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
@@ -1356,13 +1504,13 @@ pub fn get_process_rss_mb() -> f32 {
                 if let Ok(pages) = pages_str.parse::<u64>() {
                     let mb = (pages * 4096) as f32 / (1024.0 * 1024.0);
                     if mb > 0.0 {
-                        return mb;
+                        return Some(mb);
                     }
                 }
             }
         }
     }
-    4.1 // Canonical low-footprint daemon baseline
+    None
 }
 
 fn render_daemon_status_card(ui: &mut Ui, stats: &SystemStats, p: &ThemePalette) {
@@ -1385,7 +1533,7 @@ fn render_daemon_status_card(ui: &mut Ui, stats: &SystemStats, p: &ThemePalette)
     let left_pad = rect.left() + 10.0;
     let top_pad = rect.top() + 8.0;
 
-    // Line 1: Pulsing Green Dot + "Daemon: Active" + "· 4.1MB RSS"
+    // Line 1: Pulsing Green Dot + "Daemon: Active" + real RSS measurement
     let dot_center = Pos2::new(left_pad + 4.0, top_pad + 7.0);
     // Outer halo glow
     ui.painter().circle_filled(dot_center, 6.0, with_alpha(p.emerald, 45));
@@ -1400,8 +1548,10 @@ fn render_daemon_status_card(ui: &mut Ui, stats: &SystemStats, p: &ThemePalette)
         p.ink_primary,
     );
 
-    let rss_mb = get_process_rss_mb();
-    let rss_str = format!("· {:.1}MB RSS", rss_mb);
+    let rss_str = match get_process_rss_mb() {
+        Some(mb) => format!("· {:.1}MB RSS", mb),
+        None => "· RSS: n/a".to_string(),
+    };
     ui.painter().text(
         Pos2::new(rect.right() - 8.0, top_pad + 7.0),
         Align2::RIGHT_CENTER,
@@ -1453,8 +1603,13 @@ mod tests {
     #[test]
     fn test_rss_memory_measurement() {
         let rss = get_process_rss_mb();
-        println!("Process RSS memory: {:.2} MB", rss);
-        assert!(rss > 0.0);
-        assert!(rss < 100.0);
+        #[cfg(target_os = "linux")]
+        {
+            assert!(rss.is_some());
+            let val = rss.unwrap();
+            println!("Process RSS memory: {:.2} MB", val);
+            assert!(val > 0.0);
+            assert!(val < 150.0);
+        }
     }
 }

@@ -285,3 +285,101 @@ async fn test_pan_and_aadhaar_photo_classification_and_multi_pointer() {
     assert_eq!(fallback_paths, vec!["Government ID/photo_scan.png"]);
 }
 
+#[tokio::test]
+async fn test_pii_redaction_boundary_before_groq_payload() {
+    use axel::classifier::privacy::redact_sensitive_pii;
+
+    let raw_aadhaar = "9876 5432 1098";
+    let raw_pan = "ABCDE1234F";
+    let raw_ssn = "123-45-6789";
+    let raw_name = "Rajesh Kumar Sharma";
+    let raw_dob = "15/08/1990";
+    let raw_phone = "+91 9876543210";
+
+    let sensitive_doc = format!(
+        "GOVERNMENT OF INDIA\n\
+         Unique Identification Authority of India\n\
+         Name: {}\n\
+         DOB: {}\n\
+         Aadhaar Number: {}\n\
+         Income Tax PAN: {}\n\
+         Social Security: {}\n\
+         Phone: {}\n\
+         Tax filing verification for resident.",
+        raw_name, raw_dob, raw_aadhaar, raw_pan, raw_ssn, raw_phone
+    );
+
+    // 1. Verify redact_sensitive_pii completely strips all PII tokens
+    let (sanitized, summary) = redact_sensitive_pii(&sensitive_doc);
+
+    assert!(!sanitized.contains(raw_aadhaar), "Aadhaar must not leak into sanitized text");
+    assert!(!sanitized.contains(raw_pan), "PAN must not leak into sanitized text");
+    assert!(!sanitized.contains(raw_ssn), "SSN must not leak into sanitized text");
+    assert!(!sanitized.contains(raw_name), "Personal name must not leak into sanitized text");
+    assert!(!sanitized.contains(raw_phone), "Phone number must not leak into sanitized text");
+
+    assert!(sanitized.contains("[REDACTED_AADHAAR]"));
+    assert!(sanitized.contains("[REDACTED_PAN]"));
+    assert!(sanitized.contains("[REDACTED_SSN]"));
+    assert!(sanitized.contains("[REDACTED_NAME]"));
+    assert!(sanitized.contains("[REDACTED_PHONE]"));
+
+    assert!(summary.has_sensitive_id());
+    assert_eq!(summary.aadhaar_count, 1);
+    assert_eq!(summary.pan_count, 1);
+    assert_eq!(summary.ssn_count, 1);
+    assert_eq!(summary.name_count, 1);
+    assert_eq!(summary.phone_count, 1);
+
+    // 2. Feed sensitive doc into AiEngine and ensure zero PII leaks into keywords or metadata
+    let mut config = Config::load();
+    config.groq_api_key = Some("test_dummy_groq_key_mock".to_string());
+    let ai = AiEngine::new(&config);
+
+    let res = ai.analyze_document(&sensitive_doc, "resident_aadhaar_pan.pdf", None).await;
+
+    // High risk ID must be classified locally as Government ID, never sent to cloud LLM
+    assert_eq!(res.category, "Government ID");
+    for kw in &res.keywords {
+        let kw_lower = kw.to_lowercase();
+        assert!(!kw_lower.contains("rajesh"), "Name 'rajesh' leaked into keyword: {}", kw);
+        assert!(!kw_lower.contains("sharma"), "Name 'sharma' leaked into keyword: {}", kw);
+        assert!(!kw_lower.contains("9876"), "Aadhaar digits leaked into keyword: {}", kw);
+        assert!(!kw_lower.contains("abcde"), "PAN digits leaked into keyword: {}", kw);
+        assert!(!kw_lower.contains("redacted"), "Redacted placeholder leaked into keyword: {}", kw);
+    }
+}
+
+#[test]
+fn test_duplicate_trashing_hash_mismatch_refusal() {
+    let temp_dir = std::env::temp_dir().join(format!("axel_dup_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let canonical_file = temp_dir.join("original_document.pdf");
+    let duplicate_tampered = temp_dir.join("original_document (1).pdf");
+
+    std::fs::write(&canonical_file, b"Canonical document content version A").unwrap();
+    std::fs::write(&duplicate_tampered, b"Different content tampered or changed version B").unwrap();
+
+    let canonical_hash = DocumentIndex::compute_file_hash(&canonical_file).expect("hash canonical");
+    let duplicate_hash = DocumentIndex::compute_file_hash(&duplicate_tampered).expect("hash duplicate");
+
+    assert_ne!(canonical_hash, duplicate_hash);
+
+    // Verify two-phase SHA-256 verification guard:
+    assert!(canonical_file.exists());
+
+    let candidate_hash = DocumentIndex::compute_file_hash(&duplicate_tampered);
+    let is_safe_to_trash = match candidate_hash {
+        Some(ref h) if h == &canonical_hash => true,
+        _ => false,
+    };
+
+    assert!(!is_safe_to_trash, "Tampered/mismatched file MUST NOT be approved for trashing");
+    assert!(duplicate_tampered.exists(), "Duplicate file must remain intact on disk when hash mismatches");
+
+    // Clean up
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+

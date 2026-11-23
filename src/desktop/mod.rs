@@ -1121,6 +1121,16 @@ fn spawn_background_worker(
                                     .items()
                                     .iter()
                                     .filter(|i| i.is_duplicate || i.physical_paths.len() > 1)
+                                    .filter(|i| {
+                                        // Safety shield: never batch-trash sensitive identity files;
+                                        // user must review them individually in the inspector
+                                        !crate::desktop::workstation::is_sensitive_item(
+                                            &i.category,
+                                            &i.file,
+                                            &i.keywords,
+                                            None,
+                                        )
+                                    })
                                     .map(|i| {
                                         (
                                             i.hash.clone(),

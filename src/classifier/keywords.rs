@@ -78,7 +78,7 @@ impl KeywordExtractor {
         let mut cleaned = Vec::new();
         for k in keywords {
             let clean = k.trim().to_lowercase();
-            if !clean.is_empty() && !cleaned.contains(&clean) {
+            if !clean.is_empty() && !clean.contains("redacted") && !cleaned.contains(&clean) {
                 cleaned.push(clean);
             }
         }
