@@ -305,14 +305,14 @@ async fn run_check(config: &Config) {
     if config.groq_api_key.is_some() {
         println!(
             "{}",
-            "Configured (LLaMA cloud acceleration enabled)"
+            "Configured (Groq dynamic semantic intelligence enabled)"
                 .green()
                 .bold()
         );
     } else {
         println!(
             "{}",
-            "Not set (Will use local Rule Classifier & Keywords)".yellow()
+            "Not set (Offline mode: statistical TF-IDF & AST tokens only. Set GROQ_API_KEY for dynamic concept discovery)".yellow()
         );
     }
 
