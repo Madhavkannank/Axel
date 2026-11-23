@@ -96,21 +96,10 @@ pub struct DeleteOutcome {
 }
 
 pub fn category_accent(category: &str) -> &'static str {
-    match category.to_lowercase().as_str() {
-        "invoice" | "finance" | "receipt" => "amber",
-        "medical" | "health" => "cyan",
-        "technical" | "engineering" | "code" => "violet",
-        "legal" | "contract" => "rose",
-        "academic" | "research" => "emerald",
-        "resume" => "amber",
-        "media" => "cyan",
-        "personal" => "rose",
-        _ => {
-            let palette = ["amber", "violet", "cyan", "emerald", "rose"];
-            let sum: usize = category.bytes().map(|b| b as usize).sum();
-            palette[sum % palette.len()]
-        }
-    }
+    const PALETTE: [&str; 6] = ["amber", "violet", "cyan", "emerald", "rose", "indigo"];
+    let clean = category.trim().to_lowercase();
+    let sum: usize = clean.bytes().fold(0usize, |acc, b| acc.wrapping_add(b as usize));
+    PALETTE[sum % PALETTE.len()]
 }
 
 fn is_generic_link_keyword(kw: &str) -> bool {
@@ -777,10 +766,13 @@ mod tests {
 
     #[test]
     fn test_category_accent_mapping() {
-        assert_eq!(category_accent("Invoice"), "amber");
-        assert_eq!(category_accent("Medical"), "cyan");
-        assert_eq!(category_accent("Technical"), "violet");
-        assert_eq!(category_accent("Legal"), "rose");
-        assert_eq!(category_accent("Academic"), "emerald");
+        const PALETTE: [&str; 6] = ["amber", "violet", "cyan", "emerald", "rose", "indigo"];
+        let accent1 = category_accent("Invoice");
+        let accent2 = category_accent("invoice");
+        assert_eq!(accent1, accent2);
+        assert!(PALETTE.contains(&accent1));
+
+        let accent_custom = category_accent("Custom Dynamic Category From LLM");
+        assert!(PALETTE.contains(&accent_custom));
     }
 }

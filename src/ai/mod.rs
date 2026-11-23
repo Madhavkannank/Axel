@@ -2,14 +2,13 @@ pub mod groq;
 
 use crate::classifier::{
     extract_code_symbols, is_high_risk_identity_document, redact_sensitive_pii, CodeSymbols,
-    KeywordExtractor, RuleClassifier,
+    KeywordExtractor,
 };
 use crate::config::Config;
 pub use groq::{CategoryResult, GroqClient};
 
 pub struct AiEngine {
     groq: Option<GroqClient>,
-    rules: RuleClassifier,
     keywords: KeywordExtractor,
     max_keywords: usize,
 }
@@ -26,7 +25,6 @@ impl AiEngine {
 
         Self {
             groq,
-            rules: RuleClassifier::new(),
             keywords: KeywordExtractor::new(),
             max_keywords: config.max_keywords,
         }
@@ -44,16 +42,13 @@ impl AiEngine {
             text.to_string()
         };
 
-        // Step 1: Run local rule classifier with filename + extension context
-        let (rule_cat, _) = self.rules.classify_with_filename(&effective_text, file_name);
-        let mut rule_kws = self.keywords.extract(&effective_text, self.max_keywords);
-
-        // Merge TF-IDF keywords if provided
+        // Step 1: Statistical keywords via KeywordExtractor & TF-IDF
+        let mut candidate_kws = self.keywords.extract(&effective_text, self.max_keywords);
         if let Some(tfidf_kws) = suggested_tfidf_kws {
             for kw in tfidf_kws {
                 let clean = kw.to_lowercase();
-                if !rule_kws.contains(&clean) {
-                    rule_kws.push(clean);
+                if !candidate_kws.contains(&clean) {
+                    candidate_kws.push(clean);
                 }
             }
         }
@@ -61,54 +56,51 @@ impl AiEngine {
         // Step 2: Privacy Shield + Groq Semantic Discovery Layer
         // All sensitive personal identifiers (Aadhaar, PAN, SSN, Credit Cards, names, DOB)
         // are thoroughly redacted prior to sending context to the cloud LLM.
+        let (sanitized_text, redaction_summary) = redact_sensitive_pii(&effective_text);
+
         if let Some(ref client) = self.groq {
-            let (sanitized_text, _) = redact_sensitive_pii(&effective_text);
-            if !sanitized_text.trim().is_empty() {
-                if let Some(mut llm_res) = client.categorize(&sanitized_text, Some(&rule_cat), &rule_kws).await {
-                    llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, text, self.max_keywords);
-                    return llm_res;
-                }
+            let prompt_text = if !sanitized_text.trim().is_empty() {
+                sanitized_text.clone()
             } else {
-                let context_prompt = format!("File name: {file_name}. Infer category, keywords, and virtual_paths.");
-                if let Some(mut llm_res) = client.categorize(&context_prompt, Some(&rule_cat), &rule_kws).await {
-                    llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, file_name, self.max_keywords);
-                    return llm_res;
+                format!("File name: {file_name}. Infer category, keywords, and virtual_paths.")
+            };
+
+            if let Some(mut llm_res) = client.categorize(&prompt_text, &candidate_kws).await {
+                llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, text, self.max_keywords);
+                return llm_res;
+            }
+        }
+
+        // Step 3: Dynamic fallback when Groq is offline or not configured
+        let (category, fallback_kws) = if redaction_summary.has_sensitive_id()
+            || is_high_risk_identity_document(&effective_text, file_name)
+        {
+            let mut kws = Vec::new();
+            if redaction_summary.aadhaar_count > 0 {
+                kws.push("aadhaar".to_string());
+            }
+            if redaction_summary.pan_count > 0 {
+                kws.push("pan".to_string());
+            }
+            if redaction_summary.ssn_count > 0 {
+                kws.push("ssn".to_string());
+            }
+            if !kws.contains(&"government id".to_string()) {
+                kws.push("government id".to_string());
+            }
+            for kw in candidate_kws {
+                if !kws.contains(&kw) {
+                    kws.push(kw);
                 }
             }
-        }
-
-        // Step 3: Offline fallback when Groq is not configured or offline
-        let is_sensitive_id = is_high_risk_identity_document(&effective_text, file_name);
-        let category = if is_sensitive_id {
-            "Government ID".to_string()
-        } else if rule_cat.is_empty() {
-            "General".to_string()
+            ("Government ID".to_string(), kws)
         } else {
-            rule_cat
+            ("General".to_string(), candidate_kws)
         };
-
-        if is_sensitive_id {
-            let lower_eff = effective_text.to_lowercase();
-            let lower_fname = file_name.to_lowercase();
-            if (lower_eff.contains("aadhaar") || lower_eff.contains("aadhar") || lower_eff.contains("uidai")
-                || lower_eff.contains("unique identification")
-                || lower_fname.contains("aadhaar") || lower_fname.contains("aadhar"))
-                && !rule_kws.contains(&"aadhaar".to_string())
-            {
-                rule_kws.insert(0, "aadhaar".to_string());
-                rule_kws.insert(1, "government id".to_string());
-            } else if (lower_eff.contains("pan") || lower_eff.contains("income tax") || lower_eff.contains("permanent account")
-                || lower_fname.contains("pan"))
-                && !rule_kws.contains(&"pan".to_string())
-            {
-                rule_kws.insert(0, "pan".to_string());
-                rule_kws.insert(1, "government id".to_string());
-            }
-        }
 
         CategoryResult {
             category,
-            keywords: self.keywords.clean_keywords(rule_kws, &effective_text, self.max_keywords),
+            keywords: self.keywords.clean_keywords(fallback_kws, &effective_text, self.max_keywords),
             virtual_paths: Vec::new(),
         }
     }
@@ -123,26 +115,28 @@ impl AiEngine {
         let symbols = extract_code_symbols(code, ext);
         let mut candidate_kws = Vec::new();
 
-        // 1. Domain hints (e.g. calculator, arithmetic, computer vision)
-        for hint in &symbols.domain_hints {
-            candidate_kws.push(hint.clone());
-        }
-
-        // 2. TF-IDF extracted keywords
+        // 1. TF-IDF extracted keywords
         for kw in tfidf_kws {
             if !candidate_kws.contains(kw) {
                 candidate_kws.push(kw.clone());
             }
         }
 
-        // 3. Extracted identifier tokens (split snake_case / camelCase)
+        // 2. Extracted identifier tokens (split snake_case / camelCase)
         for tok in &symbols.tokens {
             if tok.len() >= 3 && !candidate_kws.contains(tok) {
                 candidate_kws.push(tok.clone());
             }
         }
 
-        // Step 2: Try Groq API for conceptual intent synthesis
+        // 3. Extracted symbol names (functions, classes, variables)
+        for sym in &symbols.symbols {
+            if sym.len() >= 3 && !candidate_kws.contains(sym) {
+                candidate_kws.push(sym.clone());
+            }
+        }
+
+        // Step 2: Groq Semantic Discovery Layer
         if let Some(ref client) = self.groq {
             let code_snippet: String = code.lines().take(60).collect::<Vec<_>>().join("\n");
             if let Some(mut llm_res) = client
@@ -151,7 +145,6 @@ impl AiEngine {
                     file_name,
                     &symbols.symbols,
                     &symbols.tokens,
-                    &symbols.domain_hints,
                 )
                 .await
             {
@@ -163,9 +156,9 @@ impl AiEngine {
                         final_kws.push(clean);
                     }
                 }
-                for hint in &symbols.domain_hints {
-                    let clean = hint.to_lowercase();
-                    if !final_kws.contains(&clean) {
+                for tok in &symbols.tokens {
+                    let clean = tok.to_lowercase();
+                    if !final_kws.contains(&clean) && final_kws.len() < 10 {
                         final_kws.push(clean);
                     }
                 }
@@ -180,19 +173,8 @@ impl AiEngine {
             }
         }
 
-        // Step 3: Offline heuristic category and keywords
-        let category = if symbols.domain_hints.iter().any(|h| h == "calculator" || h == "arithmetic" || h == "math") {
-            "Code/Math".to_string()
-        } else if symbols.domain_hints.iter().any(|h| h.contains("vision") || h.contains("opencv") || h.contains("image")) {
-            "Code/Vision".to_string()
-        } else if symbols.domain_hints.iter().any(|h| h.contains("machine learning") || h.contains("data science")) {
-            "Code/ML".to_string()
-        } else if symbols.domain_hints.iter().any(|h| h.contains("web") || h.contains("backend")) {
-            "Code/Web".to_string()
-        } else {
-            format!("Code/{}", ext.to_uppercase())
-        };
-
+        // Step 3: Offline dynamic fallback without Groq
+        let category = format!("Code/{}", ext.to_uppercase());
         candidate_kws.truncate(self.max_keywords.max(6));
 
         (

@@ -122,11 +122,11 @@ sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
 
     let index = DocumentIndex::from_items(items);
 
-    // Verify 1.py extracted symbols and inferred calculator
+    // Verify 1.py extracted symbols and tokens
     let item_1py = index.all().iter().find(|i| i.file == "1.py").expect("found 1.py");
     assert!(item_1py.symbols.contains(&"add".to_string()));
     assert!(item_1py.symbols.contains(&"subtract".to_string()));
-    assert!(item_1py.keywords.contains(&"calculator".to_string()) || item_1py.keywords.contains(&"arithmetic".to_string()) || item_1py.keywords.contains(&"math".to_string()));
+    assert!(item_1py.symbols.contains(&"multiply".to_string()));
 
     // Verify 10.py extracted variables
     let item_10py = index.all().iter().find(|i| i.file == "10.py").expect("found 10.py");
@@ -149,10 +149,10 @@ sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
     assert!(!res_add.is_empty());
     assert_eq!(res_add[0].item.file, "1.py");
 
-    // Searching for inferred concept `calculator` finds 1.py even though "calculator" is never in the code!
-    let res_calc = index.search("calculator", 5);
-    assert!(!res_calc.is_empty());
-    assert_eq!(res_calc[0].item.file, "1.py");
+    // Searching for function `subtract` finds 1.py
+    let res_sub = index.search("subtract", 5);
+    assert!(!res_sub.is_empty());
+    assert_eq!(res_sub[0].item.file, "1.py");
 }
 
 #[tokio::test]

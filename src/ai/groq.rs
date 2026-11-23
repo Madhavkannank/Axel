@@ -60,16 +60,12 @@ impl GroqClient {
         }
     }
 
-    pub async fn categorize(&self, text: &str, suggested_cat: Option<&str>, suggested_kws: &[String]) -> Option<CategoryResult> {
+    pub async fn categorize(&self, text: &str, candidate_kws: &[String]) -> Option<CategoryResult> {
         let (sanitized_text, _) = crate::classifier::redact_sensitive_pii(text);
         let text = sanitized_text.as_str();
 
-        let ml_context = if let Some(cat) = suggested_cat {
-            format!(
-                "\nMachine Learning suggestion:\nSuggested Category: {}\nSuggested Keywords: {}\nUse these suggestions if accurate, otherwise refine.\n",
-                cat,
-                suggested_kws.join(", ")
-            )
+        let kws_context = if !candidate_kws.is_empty() {
+            format!("\nExtracted candidate keywords: {}\n", candidate_kws.join(", "))
         } else {
             String::new()
         };
@@ -88,7 +84,7 @@ impl GroqClient {
             }}\n\
             Do NOT output markdown backticks, explanations, or any other text.\n\n\
             Text to analyze:\n{}",
-            ml_context, text
+            kws_context, text
         );
 
         let stricter_prompt = format!(
@@ -160,18 +156,15 @@ impl GroqClient {
         file_name: &str,
         symbols: &[String],
         tokens: &[String],
-        local_hints: &[String],
     ) -> Option<CategoryResult> {
         let symbols_str = symbols.join(", ");
         let tokens_str = tokens.join(", ");
-        let hints_str = local_hints.join(", ");
 
         let prompt = format!(
             "You are an expert code analyst for AXEL. Analyze this user-written script to determine its true functional purpose, semantic concepts, and virtual hierarchy.\n\
             File name: {}\n\
             Extracted code symbols (functions, variables, classes): {}\n\
-            Deconstructed tokens: {}\n\
-            Local heuristic hints: {}\n\n\
+            Deconstructed tokens: {}\n\n\
             Code snippet:\n{}\n\n\
             Identify the high-level semantic concept and intent of this code (for example: if it defines math functions like add/subtract/multiply, identify it as \"calculator\" and \"arithmetic\" even if the word \"calculator\" is never explicitly written in the code; or if it uses Sobel filters/OpenCV, identify it as \"computer vision\" and \"edge detection\").\n\
             Assign natural virtual folder paths such as [\"Code/<Domain>/<Language>\"].\n\
@@ -182,7 +175,7 @@ impl GroqClient {
               \"virtual_paths\": [\"Code/<Domain>/<Language>\"]\n\
             }}\n\
             Do NOT output any other text, explanation, or markdown backticks.",
-            file_name, symbols_str, tokens_str, hints_str, code_snippet
+            file_name, symbols_str, tokens_str, code_snippet
         );
 
         let mut models = vec![self.primary_model.clone()];

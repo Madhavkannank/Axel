@@ -43,27 +43,10 @@ impl KeywordExtractor {
             }
         }
 
-        let domain_boost_words: HashSet<&'static str> = [
-            "prescription", "invoice", "receipt", "salary", "contract", "agreement",
-            "diagnosis", "hospital", "patient", "medicine", "doctor", "dosage",
-            "candidate", "resume", "engineer", "developer", "experience", "education",
-            "assignment", "research", "project", "syllabus", "consulting", "optimization",
-            "balance", "statement", "account", "passport", "licence", "license", "aadhaar",
-            "rust", "python", "typescript", "transformers", "attention", "algorithm",
-        ]
-        .into_iter()
-        .collect();
-
         let mut scored_words: Vec<(String, usize)> = freq
             .into_iter()
             .map(|(w, count)| {
-                let mut score = count * 10;
-                if domain_boost_words.contains(w.as_str()) {
-                    score += 15;
-                }
-                if w.len() >= 6 {
-                    score += 3;
-                }
+                let score = count * 10 + if w.len() >= 6 { 2 } else { 0 };
                 (w, score)
             })
             .collect();

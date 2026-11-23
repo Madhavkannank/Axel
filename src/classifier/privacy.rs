@@ -85,42 +85,21 @@ fn get_re_dob_field() -> &'static Regex {
 /// Check if a document text or title represents a sensitive government identity document
 /// that should NEVER be transmitted to external cloud LLM APIs.
 pub fn is_high_risk_identity_document(text: &str, file_name: &str) -> bool {
-    let lower_text = text.to_lowercase();
     let lower_file = file_name.to_lowercase();
 
-    // Check filename tokens
+    // Check if filename suggests an identity card
     if lower_file.contains("aadhaar")
         || lower_file.contains("aadhar")
-        || lower_file.contains("uidai")
-        || lower_file.contains("pan_card")
-        || lower_file.contains("pancard")
+        || lower_file.contains("pan")
         || lower_file.contains("passport")
         || lower_file.contains("ssn")
-        || lower_file.contains("voter_id")
+        || lower_file.contains("voter")
     {
         return true;
     }
 
-    // Check Aadhaar or PAN signatures
-    if lower_text.contains("unique identification authority of india")
-        || lower_text.contains("uidai")
-        || lower_text.contains("income tax department")
-        || lower_text.contains("permanent account number")
-        || (lower_text.contains("aadhaar") && lower_text.contains("government of india"))
-    {
-        return true;
-    }
-
-    // Check if PAN or Aadhaar pattern exists with identity keywords
-    let has_pan = get_re_pan().is_match(text);
-    let has_aadhaar = get_re_aadhaar().is_match(text);
-    let has_id_keywords = lower_text.contains("identity")
-        || lower_text.contains("dob")
-        || lower_text.contains("father")
-        || lower_text.contains("resident")
-        || lower_text.contains("citizen");
-
-    (has_pan || has_aadhaar) && has_id_keywords
+    // Check if PAN, Aadhaar, or SSN pattern exists in text
+    get_re_pan().is_match(text) || get_re_aadhaar().is_match(text) || get_re_ssn().is_match(text)
 }
 
 /// Redact sensitive PII (Aadhaar, PAN, SSN, Credit Cards, Personal Names, Phone, DOB)

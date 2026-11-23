@@ -128,12 +128,12 @@ fn test_document_index_search_hybrid_blending() {
 #[tokio::test]
 async fn test_ai_filename_fallback_when_empty() {
     let mut config = Config::load();
-    config.groq_api_key = None; // Force local rule engine
+    config.groq_api_key = None; // Offline fallback without hardcoded domain bias
     let ai = AiEngine::new(&config);
 
-    // Empty text, but filename contains strong domain keywords
+    // Empty text, but filename contains statistical tokens
     let res = ai.analyze_document("", "hospital_prescription_patient_jane.pdf", None).await;
-    assert_eq!(res.category, "Medical");
+    assert_eq!(res.category, "General");
     assert!(res.keywords.contains(&"prescription".to_string()) || res.keywords.contains(&"hospital".to_string()));
 }
 

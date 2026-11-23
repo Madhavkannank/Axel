@@ -6,8 +6,6 @@ pub struct CodeSymbols {
     pub symbols: Vec<String>,
     /// Split identifier words e.g. "sobel", "image", "path"
     pub tokens: Vec<String>,
-    /// Inferred domain hints (e.g. "calculator", "vision", "web", "ml")
-    pub domain_hints: Vec<String>,
 }
 
 /// Extract symbols (functions, classes, variables, imports) from code text.
@@ -46,8 +44,6 @@ pub fn extract_code_symbols(code: &str, ext: &str) -> CodeSymbols {
         }
     }
 
-    let domain_hints = detect_code_domain_hints(code, &raw_symbols, &split_tokens);
-
     let mut symbols_vec: Vec<String> = raw_symbols.into_iter().collect();
     symbols_vec.sort();
 
@@ -57,7 +53,6 @@ pub fn extract_code_symbols(code: &str, ext: &str) -> CodeSymbols {
     CodeSymbols {
         symbols: symbols_vec,
         tokens: tokens_vec,
-        domain_hints,
     }
 }
 
@@ -336,58 +331,6 @@ fn is_code_keyword(s: &str) -> bool {
     )
 }
 
-/// Detect semantic domains from code patterns (e.g. calculator, computer vision, web, etc.)
-fn detect_code_domain_hints(
-    code: &str,
-    _symbols: &HashSet<String>,
-    tokens: &HashSet<String>,
-) -> Vec<String> {
-    let mut hints = HashSet::new();
-
-    let all_tokens_lower: HashSet<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
-    let code_lower = code.to_lowercase();
-
-    // 1. Calculator / Arithmetic hint
-    let arithmetic_names = ["add", "sub", "subtract", "mul", "multiply", "div", "divide", "calc", "calculate", "modulo", "power"];
-    let arithmetic_hits = arithmetic_names.iter().filter(|&&name| all_tokens_lower.contains(name)).count();
-    let has_arithmetic_ops = (code.contains('+') || code.contains('-')) && (code.contains('*') || code.contains('/'));
-
-    if arithmetic_hits >= 2 || (arithmetic_hits >= 1 && has_arithmetic_ops) {
-        hints.insert("calculator".to_string());
-        hints.insert("arithmetic".to_string());
-        hints.insert("math".to_string());
-    }
-
-    // 2. Computer Vision / Image processing hint
-    let vision_markers = ["cv2", "sobel", "imread", "imwrite", "cvtcolor", "opencv", "pillow", "pil", "image", "grayscale", "edge"];
-    let vision_hits = vision_markers.iter().filter(|&&v| all_tokens_lower.contains(v) || code_lower.contains(v)).count();
-    if vision_hits >= 2 {
-        hints.insert("computer vision".to_string());
-        hints.insert("image processing".to_string());
-        hints.insert("opencv".to_string());
-    }
-
-    // 3. Machine Learning / Data Science
-    let ml_markers = ["torch", "tensorflow", "sklearn", "fit", "predict", "train", "dataset", "epoch", "loss", "tensor", "numpy", "pandas", "dataframe"];
-    let ml_hits = ml_markers.iter().filter(|&&m| all_tokens_lower.contains(m) || code_lower.contains(m)).count();
-    if ml_hits >= 3 {
-        hints.insert("machine learning".to_string());
-        hints.insert("data science".to_string());
-    }
-
-    // 4. Web / API
-    let web_markers = ["http", "request", "response", "get", "post", "endpoint", "router", "route", "server", "express", "fastapi", "flask", "axum"];
-    let web_hits = web_markers.iter().filter(|&&w| all_tokens_lower.contains(w) || code_lower.contains(w)).count();
-    if web_hits >= 2 {
-        hints.insert("web api".to_string());
-        hints.insert("backend".to_string());
-    }
-
-    let mut res: Vec<String> = hints.into_iter().collect();
-    res.sort();
-    res
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,9 +358,11 @@ def divide(a, b):
         assert!(symbols.symbols.contains(&"subtract".to_string()));
         assert!(symbols.symbols.contains(&"multiply".to_string()));
         assert!(symbols.symbols.contains(&"divide".to_string()));
-        // Must deduce calculator / arithmetic
-        assert!(symbols.domain_hints.contains(&"calculator".to_string()));
-        assert!(symbols.domain_hints.contains(&"arithmetic".to_string()));
+        // Tokens should contain all deconstructed identifier tokens
+        assert!(symbols.tokens.contains(&"add".to_string()));
+        assert!(symbols.tokens.contains(&"subtract".to_string()));
+        assert!(symbols.tokens.contains(&"multiply".to_string()));
+        assert!(symbols.tokens.contains(&"divide".to_string()));
     }
 
     #[test]
@@ -441,10 +386,10 @@ cv2.imwrite("sobel_output.jpg", sobel)
         assert!(symbols.symbols.contains(&"sobel_x".to_string()));
         assert!(symbols.symbols.contains(&"sobel_y".to_string()));
         assert!(symbols.symbols.contains(&"sobel".to_string()));
-        // Sub-token split should include "sobel"
+        // Sub-token split should include "sobel", "image", "path"
         assert!(symbols.tokens.contains(&"sobel".to_string()));
-        // Domain hints should include computer vision
-        assert!(symbols.domain_hints.contains(&"computer vision".to_string()) || symbols.domain_hints.contains(&"image processing".to_string()));
+        assert!(symbols.tokens.contains(&"image".to_string()));
+        assert!(symbols.tokens.contains(&"path".to_string()));
     }
 
     #[test]
