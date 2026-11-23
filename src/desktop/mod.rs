@@ -3,6 +3,7 @@ pub mod galaxy;
 pub mod overlays;
 pub mod panels;
 pub mod theme;
+pub mod workstation;
 
 use crate::ai::AiEngine;
 use crate::config::Config;
@@ -18,6 +19,7 @@ use crate::desktop::theme::{
     active_theme, font_medium, font_sans, install_fonts_and_theme, palette, set_active_theme,
     with_alpha,
 };
+use crate::desktop::workstation::render_workstation;
 use crate::engine::{
     analyze_and_build_item, build_document_detail, build_graph_snapshot, build_system_stats,
     delete_document_from_index, ingest_local_files, scan_folder_into_items, DocumentDetail,
@@ -157,7 +159,7 @@ impl AxelDesktopApp {
             search_index: DocumentIndex::from_items(Vec::new()),
             layout: GalaxyLayout::default(),
             camera: GalaxyCamera::default(),
-            view_mode: ViewMode::Galaxy,
+            view_mode: ViewMode::Workstation,
             show_activity: true,
             show_telemetry: false,
             is_maximized: false,
@@ -466,6 +468,42 @@ impl AxelDesktopApp {
                     self.dock_index = idx % self.snapshot.nodes.len();
                 }
             }
+            PanelAction::AppendSearchToken(token) => {
+                let trimmed = self.search_query.trim();
+                if trimmed.is_empty() {
+                    self.search_query = token;
+                } else if !trimmed.split_whitespace().any(|t| t == token) {
+                    self.search_query = format!("{} {}", trimmed, token);
+                }
+                self.search_popover_open = true;
+                self.focus_search_requested = true;
+                self.recompute_search();
+            }
+            PanelAction::TrashDuplicateFile {
+                canonical_hash,
+                trash_path,
+            } => {
+                let path = std::path::Path::new(&trash_path);
+                if path.exists() {
+                    match trash::delete(path) {
+                        Ok(_) => {
+                            self.status_text = Some(format!(
+                                "Moved duplicate {} to trash",
+                                path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+                            ));
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to trash duplicate {}: {}", trash_path, e);
+                            self.error_banner = Some((
+                                format!("Failed to move duplicate to trash: {}", e),
+                                Instant::now(),
+                            ));
+                        }
+                    }
+                }
+                self.select_node(canonical_hash, true);
+                let _ = self.cmd_tx.send(WorkerCommand::Scan { force: false });
+            }
         }
     }
 
@@ -638,6 +676,21 @@ impl eframe::App for AxelDesktopApp {
             .show(ui, |ui| {
                 canvas_rect = ui.max_rect();
                 galaxy_action = match self.view_mode {
+                    ViewMode::Workstation => {
+                        let (g_act, p_act) = render_workstation(
+                            ui,
+                            canvas_rect,
+                            &self.snapshot,
+                            &self.search_index,
+                            self.selected_node.as_deref(),
+                            self.active_category_filter.as_deref(),
+                            &self.search_highlight_hashes,
+                            self.active_detail.as_ref(),
+                            &mut self.confirm_delete,
+                        );
+                        merge_action(&mut pending_action, p_act);
+                        g_act
+                    }
                     ViewMode::Galaxy => render_galaxy_canvas(
                         ui,
                         canvas_rect,
@@ -731,10 +784,12 @@ impl eframe::App for AxelDesktopApp {
             );
 
             if let Some(ref detail) = self.active_detail {
-                merge_action(
-                    &mut pending_action,
-                    render_inspector_drawer(&ctx, canvas_rect, detail, &mut self.confirm_delete),
-                );
+                if self.view_mode != ViewMode::Workstation {
+                    merge_action(
+                        &mut pending_action,
+                        render_inspector_drawer(&ctx, canvas_rect, detail, &mut self.confirm_delete),
+                    );
+                }
             } else if self.show_telemetry {
                 merge_action(
                     &mut pending_action,

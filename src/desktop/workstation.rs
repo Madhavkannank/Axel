@@ -1,0 +1,1109 @@
+use crate::desktop::chrome::{format_relative_time, PanelAction};
+use crate::desktop::galaxy::{format_bytes, truncate_label, GalaxyAction};
+use crate::desktop::theme::{
+    accent_bright, accent_color, draw_icon_close, draw_icon_file_type, draw_icon_folder,
+    draw_icon_shield, draw_icon_trash, draw_icon_workstation, font_medium, font_mono, font_sans,
+    font_semibold, palette, with_alpha, ThemePalette,
+};
+use crate::engine::{category_accent, DocumentDetail, GraphNode, GraphSnapshot};
+use crate::index::{build_virtual_tree, DocumentIndex, VirtualFolder};
+use chrono::Utc;
+use egui::{
+    Align, Align2, Color32, CornerRadius, CursorIcon, Frame, Id, Layout, Margin, Pos2, Rect,
+    ScrollArea, Sense, Stroke, StrokeKind, Ui, Vec2,
+};
+use std::collections::HashSet;
+use std::path::Path;
+
+pub fn render_workstation(
+    ui: &mut Ui,
+    rect: Rect,
+    snapshot: &GraphSnapshot,
+    search_index: &DocumentIndex,
+    selected_node: Option<&str>,
+    active_category_filter: Option<&str>,
+    search_highlight_hashes: &HashSet<String>,
+    active_detail: Option<&DocumentDetail>,
+    confirm_delete: &mut bool,
+) -> (GalaxyAction, PanelAction) {
+    let mut galaxy_action = GalaxyAction::None;
+    let mut panel_action = PanelAction::None;
+    let p = palette();
+
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::ZERO, p.bg_canvas);
+
+    let inner = rect.shrink2(Vec2::new(16.0, 14.0));
+    let mut child_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+
+    // Top Header Status
+    child_ui.horizontal(|ui| {
+        let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+        draw_icon_workstation(ui.painter(), icon_rect.center(), 18.0, p.indigo_bright);
+        ui.add_space(6.0);
+
+        ui.label(
+            egui::RichText::new("AXEL Workstation")
+                .font(font_semibold(15.5))
+                .color(p.ink_primary),
+        );
+        ui.add_space(8.0);
+        let items_len = search_index.items().len().max(snapshot.nodes.len());
+        ui.label(
+            egui::RichText::new(format!(
+                "{} files indexed · {} taxonomy clusters",
+                items_len,
+                snapshot.hubs.len()
+            ))
+            .font(font_sans(11.5))
+            .color(p.ink_muted),
+        );
+
+        if let Some(cat) = active_category_filter {
+            ui.add_space(10.0);
+            let (chip_rect, chip_resp) =
+                ui.allocate_exact_size(Vec2::new(140.0, 20.0), Sense::click());
+            ui.painter().rect_filled(
+                chip_rect,
+                CornerRadius::same(5),
+                with_alpha(p.indigo, 40),
+            );
+            ui.painter().text(
+                Pos2::new(chip_rect.left() + 6.0, chip_rect.center().y),
+                Align2::LEFT_CENTER,
+                format!("Filter: {} ✕", truncate_label(cat, 16)),
+                font_medium(10.5),
+                p.indigo_bright,
+            );
+            if chip_resp.clicked() {
+                panel_action = PanelAction::SetCategoryFilter(None);
+            }
+        }
+    });
+    child_ui.add_space(10.0);
+
+    let avail_rect = child_ui.available_rect_before_wrap();
+    let total_w = avail_rect.width();
+    let total_h = avail_rect.height();
+
+    // 3-Column Width Calculations
+    let (left_w, right_w) = if total_w >= 1050.0 {
+        (230.0_f32, 340.0_f32)
+    } else if total_w >= 780.0 {
+        (200.0_f32, 290.0_f32)
+    } else {
+        (180.0_f32, 0.0_f32)
+    };
+
+    let col_gap = 12.0_f32;
+    let mid_w = (total_w - left_w - right_w - if right_w > 0.0 { col_gap * 2.0 } else { col_gap }).max(120.0);
+
+    let left_rect = Rect::from_min_size(avail_rect.min, Vec2::new(left_w, total_h));
+    let mid_rect = Rect::from_min_size(
+        Pos2::new(avail_rect.min.x + left_w + col_gap, avail_rect.min.y),
+        Vec2::new(mid_w, total_h),
+    );
+    let right_rect = if right_w > 0.0 {
+        Rect::from_min_size(
+            Pos2::new(avail_rect.min.x + left_w + mid_w + col_gap * 2.0, avail_rect.min.y),
+            Vec2::new(right_w, total_h),
+        )
+    } else {
+        Rect::NOTHING
+    };
+
+    // ==========================================
+    // COLUMN 1: Smart Views & Virtual Directory Tree
+    // ==========================================
+    let mut left_ui = child_ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(left_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+
+    Frame::new()
+        .fill(p.bg_chrome)
+        .stroke(Stroke::new(1.0, p.border_subtle))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::same(12))
+        .show(&mut left_ui, |ui| {
+            ui.set_width(left_w - 24.0);
+            ui.set_height(total_h - 24.0);
+
+            ScrollArea::vertical()
+                .id_salt("workstation_col1_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("SMART VIEWS")
+                            .font(font_semibold(10.5))
+                            .color(p.ink_muted),
+                    );
+                    ui.add_space(6.0);
+
+                    // 1. All Items
+                    let is_all = active_category_filter.is_none();
+                    let total_count = search_index.items().len().max(snapshot.nodes.len());
+                    if render_smart_view_button(
+                        ui,
+                        "≡ All Items",
+                        total_count,
+                        is_all,
+                        p.indigo,
+                        &p,
+                    ) {
+                        panel_action = PanelAction::SetCategoryFilter(None);
+                        galaxy_action = GalaxyAction::ClearSelection;
+                    }
+
+                    // 2. Duplicates
+                    let dup_count = search_index
+                        .items()
+                        .iter()
+                        .filter(|i| i.is_duplicate || i.physical_paths.len() > 1)
+                        .count();
+                    let is_dup = active_category_filter == Some("Duplicates");
+                    if render_smart_view_button(
+                        ui,
+                        "• Duplicates",
+                        dup_count,
+                        is_dup,
+                        p.copper_bright,
+                        &p,
+                    ) {
+                        panel_action = PanelAction::SetCategoryFilter(Some("Duplicates".to_string()));
+                    }
+
+                    // 3. User Scripts
+                    let script_count = search_index
+                        .items()
+                        .iter()
+                        .filter(|i| {
+                            let ext = Path::new(&i.file)
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or_default()
+                                .to_lowercase();
+                            let cat = i.category.to_lowercase();
+                            matches!(ext.as_str(), "py" | "rs" | "js" | "ts" | "sh" | "bash" | "zsh" | "rb" | "go" | "c" | "cpp" | "h")
+                                || cat.contains("code")
+                                || cat.contains("script")
+                        })
+                        .count();
+                    let is_scripts = active_category_filter == Some("User Scripts");
+                    if render_smart_view_button(
+                        ui,
+                        "</> User Scripts",
+                        script_count,
+                        is_scripts,
+                        p.indigo_bright,
+                        &p,
+                    ) {
+                        panel_action = PanelAction::SetCategoryFilter(Some("User Scripts".to_string()));
+                    }
+
+                    // 4. Documents
+                    let doc_count = search_index
+                        .items()
+                        .iter()
+                        .filter(|i| {
+                            let ext = Path::new(&i.file)
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or_default()
+                                .to_lowercase();
+                            let cat = i.category.to_lowercase();
+                            matches!(ext.as_str(), "pdf" | "docx" | "doc" | "txt" | "md" | "csv" | "json")
+                                || cat.contains("document")
+                                || cat.contains("paper")
+                                || cat.contains("academic")
+                                || cat.contains("report")
+                                || cat.contains("study")
+                        })
+                        .count();
+                    let is_docs = active_category_filter == Some("Documents");
+                    if render_smart_view_button(
+                        ui,
+                        "📄 Documents",
+                        doc_count,
+                        is_docs,
+                        p.emerald,
+                        &p,
+                    ) {
+                        panel_action = PanelAction::SetCategoryFilter(Some("Documents".to_string()));
+                    }
+
+                    // 5. Media
+                    let media_count = search_index
+                        .items()
+                        .iter()
+                        .filter(|i| {
+                            let ext = Path::new(&i.file)
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or_default()
+                                .to_lowercase();
+                            let cat = i.category.to_lowercase();
+                            matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "mp4" | "mkv" | "webm" | "mp3" | "wav")
+                                || cat.contains("media")
+                                || cat.contains("image")
+                                || cat.contains("video")
+                        })
+                        .count();
+                    let is_media = active_category_filter == Some("Media");
+                    if render_smart_view_button(
+                        ui,
+                        "🖼 Media",
+                        media_count,
+                        is_media,
+                        p.copper,
+                        &p,
+                    ) {
+                        panel_action = PanelAction::SetCategoryFilter(Some("Media".to_string()));
+                    }
+
+                    ui.add_space(14.0);
+                    ui.label(
+                        egui::RichText::new("VIRTUAL DIRECTORY TREE")
+                            .font(font_semibold(10.5))
+                            .color(p.ink_muted),
+                    );
+                    ui.add_space(6.0);
+
+                    // Dynamic Virtual Directory Tree built from items
+                    let vtree = build_virtual_tree(search_index.items());
+                    for (_name, folder) in &vtree.subfolders {
+                        render_virtual_folder_branch(
+                            ui,
+                            folder,
+                            0,
+                            active_category_filter,
+                            &mut panel_action,
+                            &p,
+                        );
+                    }
+                });
+        });
+
+    // ==========================================
+    // COLUMN 2: Virtualized File Ledger (show_rows)
+    // ==========================================
+    let mut mid_ui = child_ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(mid_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+
+    Frame::new()
+        .fill(p.bg_chrome)
+        .stroke(Stroke::new(1.0, p.border_subtle))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::same(12))
+        .show(&mut mid_ui, |ui| {
+            ui.set_width(mid_w - 24.0);
+            ui.set_height(total_h - 24.0);
+
+            // Column Header
+            ui.horizontal(|ui| {
+                ui.add_space(26.0);
+                ui.label(
+                    egui::RichText::new("FILE")
+                        .font(font_semibold(10.5))
+                        .color(p.ink_muted),
+                );
+                ui.add_space(110.0);
+                ui.label(
+                    egui::RichText::new("CATEGORY / VIRTUAL PATH")
+                        .font(font_semibold(10.5))
+                        .color(p.ink_muted),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new("SIZE")
+                            .font(font_semibold(10.5))
+                            .color(p.ink_muted),
+                    );
+                    ui.add_space(60.0);
+                    ui.label(
+                        egui::RichText::new("SYMBOLS / KEYWORDS")
+                            .font(font_semibold(10.5))
+                            .color(p.ink_muted),
+                    );
+                });
+            });
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // Filter ledger nodes
+            let filtered_nodes: Vec<&GraphNode> = snapshot
+                .nodes
+                .iter()
+                .filter(|n| {
+                    if let Some(cat) = active_category_filter {
+                        match cat {
+                            "Duplicates" => {
+                                if let Some(item) = search_index.find_by_hash(&n.hash) {
+                                    if !item.is_duplicate && item.physical_paths.len() <= 1 {
+                                        return false;
+                                    }
+                                } else {
+                                    return false;
+                                }
+                            }
+                            "User Scripts" => {
+                                let ext = Path::new(&n.file)
+                                    .extension()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or_default()
+                                    .to_lowercase();
+                                let cat_l = n.category.to_lowercase();
+                                let is_script = matches!(ext.as_str(), "py" | "rs" | "js" | "ts" | "sh" | "bash" | "zsh" | "rb" | "go" | "c" | "cpp" | "h")
+                                    || cat_l.contains("code")
+                                    || cat_l.contains("script");
+                                if !is_script {
+                                    return false;
+                                }
+                            }
+                            "Documents" => {
+                                let ext = Path::new(&n.file)
+                                    .extension()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or_default()
+                                    .to_lowercase();
+                                let cat_l = n.category.to_lowercase();
+                                let is_doc = matches!(ext.as_str(), "pdf" | "docx" | "doc" | "txt" | "md" | "csv" | "json")
+                                    || cat_l.contains("document")
+                                    || cat_l.contains("paper")
+                                    || cat_l.contains("academic")
+                                    || cat_l.contains("report")
+                                    || cat_l.contains("study");
+                                if !is_doc {
+                                    return false;
+                                }
+                            }
+                            "Media" => {
+                                let ext = Path::new(&n.file)
+                                    .extension()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or_default()
+                                    .to_lowercase();
+                                let cat_l = n.category.to_lowercase();
+                                let is_media = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "mp4" | "mkv" | "webm" | "mp3" | "wav")
+                                    || cat_l.contains("media")
+                                    || cat_l.contains("image")
+                                    || cat_l.contains("video");
+                                if !is_media {
+                                    return false;
+                                }
+                            }
+                            filter => {
+                                let filter_l = filter.to_lowercase();
+                                let cat_l = n.category.to_lowercase();
+                                let matches_cat = cat_l.contains(&filter_l);
+                                let matches_vp = search_index
+                                    .find_by_hash(&n.hash)
+                                    .map(|item| {
+                                        item.virtual_paths
+                                            .iter()
+                                            .any(|vp| vp.to_lowercase().contains(&filter_l))
+                                    })
+                                    .unwrap_or(false);
+                                if !matches_cat && !matches_vp {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+
+                    if !search_highlight_hashes.is_empty()
+                        && !search_highlight_hashes.contains(&n.hash)
+                    {
+                        return false;
+                    }
+
+                    true
+                })
+                .collect();
+
+            let row_h = 36.0;
+            let num_rows = filtered_nodes.len();
+
+            ScrollArea::vertical()
+                .id_salt("workstation_file_ledger_rows")
+                .auto_shrink([false, false])
+                .show_rows(ui, row_h, num_rows, |ui, row_range| {
+                    for idx in row_range {
+                        if let Some(node) = filtered_nodes.get(idx) {
+                            let is_selected = selected_node == Some(&node.hash);
+                            let (row_rect, row_resp) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), row_h - 2.0),
+                                Sense::click(),
+                            );
+
+                            let row_bg = if is_selected {
+                                with_alpha(p.indigo, 48)
+                            } else if row_resp.hovered() {
+                                p.bg_surface_hover
+                            } else if idx % 2 == 1 {
+                                with_alpha(p.bg_surface, 110)
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+                            ui.painter().rect_filled(row_rect, CornerRadius::same(6), row_bg);
+
+                            if is_selected {
+                                ui.painter().rect_stroke(
+                                    row_rect,
+                                    CornerRadius::same(6),
+                                    Stroke::new(1.0, with_alpha(p.indigo, 210)),
+                                    StrokeKind::Inside,
+                                );
+                            }
+
+                            // Icon
+                            let ic_center = Pos2::new(row_rect.left() + 14.0, row_rect.center().y);
+                            draw_icon_file_type(
+                                ui.painter(),
+                                ic_center,
+                                14.0,
+                                &node.file_type,
+                                if is_selected { p.indigo_bright } else { p.ink_muted },
+                            );
+
+                            // File Name
+                            let name_pos = Pos2::new(row_rect.left() + 28.0, row_rect.center().y);
+                            ui.painter().text(
+                                name_pos,
+                                Align2::LEFT_CENTER,
+                                truncate_label(&node.file, 22),
+                                font_medium(12.0),
+                                if is_selected { p.ink_primary } else { p.ink_secondary },
+                            );
+
+                            // Duplicate Badge
+                            let is_dup = search_index
+                                .find_by_hash(&node.hash)
+                                .map(|i| i.is_duplicate || i.physical_paths.len() > 1)
+                                .unwrap_or(false);
+                            if is_dup {
+                                let badge_rect = Rect::from_min_size(
+                                    Pos2::new(row_rect.left() + 180.0, row_rect.center().y - 8.0),
+                                    Vec2::new(42.0, 16.0),
+                                );
+                                ui.painter().rect_filled(
+                                    badge_rect,
+                                    CornerRadius::same(4),
+                                    with_alpha(p.copper_bright, 45),
+                                );
+                                ui.painter().text(
+                                    badge_rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    "• DUP",
+                                    font_semibold(9.5),
+                                    p.copper_bright,
+                                );
+                            }
+
+                            // Category / Virtual Path
+                            let cat_pos = Pos2::new(row_rect.left() + 235.0, row_rect.center().y);
+                            let accent_name = category_accent(&node.category);
+                            let cat_col = accent_color(accent_name);
+                            ui.painter().text(
+                                cat_pos,
+                                Align2::LEFT_CENTER,
+                                truncate_label(&node.category, 24),
+                                font_sans(11.0),
+                                cat_col,
+                            );
+
+                            // Right-aligned Size
+                            let right_end = row_rect.right() - 8.0;
+                            let size_str = format_bytes(node.size_bytes);
+                            ui.painter().text(
+                                Pos2::new(right_end, row_rect.center().y),
+                                Align2::RIGHT_CENTER,
+                                size_str,
+                                font_mono(10.5),
+                                p.ink_muted,
+                            );
+
+                            // Symbols / Keywords
+                            if let Some(item) = search_index.find_by_hash(&node.hash) {
+                                if !item.symbols.is_empty() {
+                                    let syms = item
+                                        .symbols
+                                        .iter()
+                                        .take(2)
+                                        .map(|s| format!("@{}", s))
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    ui.painter().text(
+                                        Pos2::new(right_end - 85.0, row_rect.center().y),
+                                        Align2::RIGHT_CENTER,
+                                        truncate_label(&syms, 22),
+                                        font_mono(10.0),
+                                        p.ink_muted,
+                                    );
+                                } else if !item.keywords.is_empty() {
+                                    let kws = item
+                                        .keywords
+                                        .iter()
+                                        .take(2)
+                                        .map(|k| format!("#{}", k))
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    ui.painter().text(
+                                        Pos2::new(right_end - 85.0, row_rect.center().y),
+                                        Align2::RIGHT_CENTER,
+                                        truncate_label(&kws, 22),
+                                        font_sans(10.0),
+                                        p.ink_muted,
+                                    );
+                                }
+                            }
+
+                            if row_resp.clicked() {
+                                galaxy_action = GalaxyAction::SelectNode(node.hash.clone());
+                            }
+                            if row_resp.double_clicked() {
+                                panel_action = PanelAction::OpenFileExternal(node.path.clone());
+                            }
+                        }
+                    }
+                });
+        });
+
+    // ==========================================
+    // COLUMN 3: Intelligence Inspector
+    // ==========================================
+    if right_w > 0.0 {
+        let mut right_ui = child_ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(right_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+
+        Frame::new()
+            .fill(p.bg_chrome)
+            .stroke(Stroke::new(1.0, p.border_subtle))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(Margin::same(12))
+            .show(&mut right_ui, |ui| {
+                ui.set_width(right_w - 24.0);
+                ui.set_height(total_h - 24.0);
+
+                if let Some(detail) = active_detail {
+                    render_inspector_content(
+                        ui,
+                        detail,
+                        confirm_delete,
+                        &mut panel_action,
+                        &mut galaxy_action,
+                        &p,
+                    );
+                } else {
+                    render_inspector_empty_state(ui, search_index, snapshot, &p);
+                }
+            });
+    }
+
+    (galaxy_action, panel_action)
+}
+
+fn render_smart_view_button(
+    ui: &mut Ui,
+    label: &str,
+    count: usize,
+    is_active: bool,
+    accent: Color32,
+    p: &ThemePalette,
+) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
+    let bg = if is_active {
+        with_alpha(accent, 42)
+    } else if resp.hovered() {
+        p.bg_surface_hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
+    ui.painter().text(
+        Pos2::new(rect.left() + 8.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        format!("{} ({})", label, count),
+        font_medium(11.0),
+        if is_active { accent } else { p.ink_primary },
+    );
+    resp.clicked()
+}
+
+fn render_virtual_folder_branch(
+    ui: &mut Ui,
+    folder: &VirtualFolder,
+    depth: usize,
+    active_filter: Option<&str>,
+    panel_action: &mut PanelAction,
+    p: &ThemePalette,
+) {
+    let is_active = active_filter == Some(&folder.name) || active_filter == Some(&folder.path);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
+
+    let bg = if is_active {
+        with_alpha(p.indigo, 40)
+    } else if resp.hovered() {
+        p.bg_surface_hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(5), bg);
+
+    let indent = 8.0 + (depth as f32) * 12.0;
+    let ic_center = Pos2::new(rect.left() + indent + 6.0, rect.center().y);
+    draw_icon_folder(
+        ui.painter(),
+        ic_center,
+        12.0,
+        if is_active { p.copper_bright } else { p.indigo_bright },
+    );
+
+    let label_pos = Pos2::new(rect.left() + indent + 18.0, rect.center().y);
+    let count = folder.total_item_count();
+    let label = format!("{} ({})", truncate_label(&folder.name, 16), count);
+    ui.painter().text(
+        label_pos,
+        Align2::LEFT_CENTER,
+        label,
+        font_sans(10.5),
+        if is_active { p.indigo_bright } else { p.ink_secondary },
+    );
+
+    if resp.clicked() {
+        *panel_action = PanelAction::SetCategoryFilter(Some(folder.name.clone()));
+    }
+
+    // Render subfolders (up to 2 levels deep for clean hierarchy)
+    if depth < 2 {
+        for (_child_name, child_folder) in &folder.subfolders {
+            render_virtual_folder_branch(
+                ui,
+                child_folder,
+                depth + 1,
+                active_filter,
+                panel_action,
+                p,
+            );
+        }
+    }
+}
+
+fn render_inspector_content(
+    ui: &mut Ui,
+    detail: &DocumentDetail,
+    confirm_delete: &mut bool,
+    panel_action: &mut PanelAction,
+    galaxy_action: &mut GalaxyAction,
+    p: &ThemePalette,
+) {
+    let accent_name = category_accent(&detail.item.category);
+    let accent = accent_color(accent_name);
+    let bright = accent_bright(accent_name);
+
+    ScrollArea::vertical()
+        .id_salt("workstation_inspector_content_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Header
+            ui.horizontal(|ui| {
+                let (ic_rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                ui.painter().rect_filled(
+                    ic_rect,
+                    CornerRadius::same(7),
+                    with_alpha(accent, 45),
+                );
+                draw_icon_file_type(ui.painter(), ic_rect.center(), 16.0, &detail.file_type, bright);
+
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(truncate_label(&detail.item.file, 22))
+                            .font(font_semibold(13.0))
+                            .color(p.ink_primary),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} · {}",
+                            detail.item.category,
+                            format_bytes(detail.size_bytes)
+                        ))
+                        .font(font_sans(10.5))
+                        .color(bright),
+                    );
+                });
+
+                ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                    let (c_rect, c_resp) =
+                        ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
+                    draw_icon_close(
+                        ui.painter(),
+                        c_rect.center(),
+                        10.0,
+                        if c_resp.hovered() { p.ink_primary } else { p.ink_muted },
+                    );
+                    if c_resp.clicked() {
+                        *galaxy_action = GalaxyAction::ClearSelection;
+                        *panel_action = PanelAction::CloseInspector;
+                    }
+                });
+            });
+            ui.add_space(8.0);
+
+            // SHA-256 & Status Card
+            let short_hash: String = detail.item.hash.chars().take(12).collect();
+            let rel = format_relative_time(detail.item.indexed_at.as_deref(), Utc::now());
+            Frame::new()
+                .fill(p.bg_surface)
+                .stroke(Stroke::new(1.0, p.border_subtle))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("SHA {short_hash}"))
+                                .font(font_mono(10.0))
+                                .color(p.ink_muted),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(if detail.file_exists {
+                                    format!("{rel} · On disk")
+                                } else {
+                                    format!("{rel} · Missing")
+                                })
+                                .font(font_sans(10.0))
+                                .color(if detail.file_exists { p.emerald } else { p.danger }),
+                            );
+                        });
+                    });
+                });
+            ui.add_space(10.0);
+
+            // Physical Copies & Safe OS Trashing
+            if detail.item.physical_paths.len() > 1 || detail.item.is_duplicate {
+                ui.label(
+                    egui::RichText::new("Physical Copies & Deduplication")
+                        .font(font_medium(11.0))
+                        .color(p.copper_bright),
+                );
+                ui.add_space(4.0);
+
+                for (idx, ppath) in detail.item.physical_paths.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let is_primary = idx == 0;
+                        let prefix = if is_primary { "1. " } else { "2. " };
+                        ui.label(
+                            egui::RichText::new(format!("{}{}", prefix, truncate_label(ppath, 20)))
+                                .font(font_mono(10.0))
+                                .color(if is_primary { p.ink_primary } else { p.copper_bright }),
+                        );
+
+                        if !is_primary {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let (tr_rect, tr_resp) =
+                                    ui.allocate_exact_size(Vec2::new(56.0, 19.0), Sense::click());
+                                let tr_bg = if tr_resp.hovered() {
+                                    p.danger
+                                } else {
+                                    with_alpha(p.danger, 45)
+                                };
+                                ui.painter().rect_filled(tr_rect, CornerRadius::same(4), tr_bg);
+                                let tr_icon_pos = Pos2::new(tr_rect.left() + 9.0, tr_rect.center().y);
+                                draw_icon_trash(
+                                    ui.painter(),
+                                    tr_icon_pos,
+                                    11.0,
+                                    if tr_resp.hovered() { Color32::WHITE } else { p.danger },
+                                );
+                                ui.painter().text(
+                                    Pos2::new(tr_rect.left() + 18.0, tr_rect.center().y),
+                                    Align2::LEFT_CENTER,
+                                    "Trash",
+                                    font_medium(9.5),
+                                    if tr_resp.hovered() { Color32::WHITE } else { p.danger },
+                                );
+                                if tr_resp.clicked() {
+                                    *panel_action = PanelAction::TrashDuplicateFile {
+                                        canonical_hash: detail.item.hash.clone(),
+                                        trash_path: ppath.clone(),
+                                    };
+                                }
+                            });
+                        }
+                    });
+                }
+                ui.add_space(8.0);
+            }
+
+            // Virtual Multi-Pointers
+            if !detail.item.virtual_paths.is_empty() {
+                ui.label(
+                    egui::RichText::new("Virtual Multi-Pointers")
+                        .font(font_medium(11.0))
+                        .color(p.ink_muted),
+                );
+                ui.add_space(4.0);
+                for vp in &detail.item.virtual_paths {
+                    ui.horizontal(|ui| {
+                        let (ic_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                        draw_icon_folder(ui.painter(), ic_rect.center(), 11.0, p.indigo_bright);
+                        ui.label(
+                            egui::RichText::new(truncate_label(vp, 28))
+                                .font(font_mono(10.0))
+                                .color(p.ink_secondary),
+                        );
+                    });
+                }
+                ui.add_space(8.0);
+            }
+
+            // Extracted AST Symbols
+            if !detail.item.symbols.is_empty() {
+                ui.label(
+                    egui::RichText::new("Extracted AST Symbols")
+                        .font(font_medium(11.0))
+                        .color(p.ink_muted),
+                );
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                    for sym in &detail.item.symbols {
+                        let chip = format!("@{}", sym);
+                        if render_chip_button(ui, &chip, p.indigo, p) {
+                            *panel_action = PanelAction::AppendSearchToken(chip);
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+            }
+
+            // Extracted Keywords
+            if !detail.item.keywords.is_empty() {
+                ui.label(
+                    egui::RichText::new("Extracted Keywords")
+                        .font(font_medium(11.0))
+                        .color(p.ink_muted),
+                );
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                    for kw in &detail.item.keywords {
+                        let chip = format!("#{}", kw);
+                        if render_chip_button(ui, &chip, accent, p) {
+                            *panel_action = PanelAction::AppendSearchToken(chip);
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+            }
+
+            // Shoulder-Surfing Privacy Shield
+            let is_sensitive = detail.item.category.contains("Identity")
+                || detail.item.category.contains("Sensitive")
+                || detail.item.category.contains("Government")
+                || detail.item.category.contains("PAN")
+                || detail.item.category.contains("Aadhaar")
+                || detail.item.category.contains("Passport")
+                || detail.item.category.contains("Tax")
+                || detail.item.category.contains("Personal");
+
+            let shield_id = Id::unique(format!("workstation_shield_{}", detail.item.hash));
+            let is_revealed = ui.ctx().data_mut(|d| d.get_temp::<bool>(shield_id).unwrap_or(false));
+
+            ui.label(
+                egui::RichText::new("Content Preview")
+                    .font(font_medium(11.0))
+                    .color(p.ink_muted),
+            );
+            ui.add_space(4.0);
+
+            let preview_h = 130.0;
+            Frame::new()
+                .fill(p.bg_void)
+                .stroke(Stroke::new(
+                    1.0,
+                    if is_sensitive && !is_revealed {
+                        with_alpha(p.copper_bright, 180)
+                    } else {
+                        p.border_subtle
+                    },
+                ))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::same(8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.set_height(preview_h);
+
+                    if is_sensitive && !is_revealed {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(14.0);
+                            let (sh_rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                            draw_icon_shield(ui.painter(), sh_rect.center(), 20.0, p.copper_bright);
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("🔒 Privacy Shield Active")
+                                    .font(font_semibold(11.5))
+                                    .color(p.copper_bright),
+                            );
+                            ui.label(
+                                egui::RichText::new("Sensitive Document Masked")
+                                    .font(font_sans(9.5))
+                                    .color(p.ink_muted),
+                            );
+                            ui.add_space(8.0);
+                            let (rev_rect, rev_resp) =
+                                ui.allocate_exact_size(Vec2::new(96.0, 20.0), Sense::click());
+                            ui.painter().rect_filled(
+                                rev_rect,
+                                CornerRadius::same(4),
+                                if rev_resp.hovered() { p.bg_surface_hover } else { p.bg_surface },
+                            );
+                            ui.painter().text(
+                                rev_rect.center(),
+                                Align2::CENTER_CENTER,
+                                "👁 Click to Reveal",
+                                font_medium(10.0),
+                                p.ink_primary,
+                            );
+                            if rev_resp.clicked() {
+                                ui.ctx().data_mut(|d| d.insert_temp(shield_id, true));
+                            }
+                        });
+                    } else {
+                        ScrollArea::vertical()
+                            .id_salt("workstation_preview_text_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(&detail.text_preview)
+                                        .font(font_mono(10.5))
+                                        .color(p.ink_secondary),
+                                );
+                            });
+                    }
+                });
+
+            ui.add_space(10.0);
+
+            // Action Buttons
+            ui.horizontal(|ui| {
+                if ui.button(egui::RichText::new("Open File").font(font_medium(10.5))).clicked() {
+                    *panel_action = PanelAction::OpenFileExternal(detail.item.path.clone());
+                }
+                if ui.button(egui::RichText::new("In Folder").font(font_medium(10.5))).clicked() {
+                    *panel_action = PanelAction::RevealFolderExternal(detail.item.path.clone());
+                }
+                if *confirm_delete {
+                    if ui.button(egui::RichText::new("Confirm Remove").font(font_medium(10.5)).color(p.danger)).clicked() {
+                        *confirm_delete = false;
+                        *panel_action = PanelAction::DeleteDocument {
+                            hash: detail.item.hash.clone(),
+                            delete_file: false,
+                        };
+                    }
+                } else if ui.button(egui::RichText::new("Remove").font(font_medium(10.5)).color(p.ink_muted)).clicked() {
+                    *confirm_delete = true;
+                }
+            });
+        });
+}
+
+fn render_inspector_empty_state(
+    ui: &mut Ui,
+    search_index: &DocumentIndex,
+    snapshot: &GraphSnapshot,
+    p: &ThemePalette,
+) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(40.0);
+        let (ic_rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+        draw_icon_workstation(ui.painter(), ic_rect.center(), 32.0, with_alpha(p.indigo, 120));
+        ui.add_space(12.0);
+
+        ui.label(
+            egui::RichText::new("Intelligence Inspector")
+                .font(font_semibold(13.5))
+                .color(p.ink_primary),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "Select any file from the ledger to inspect its AST symbols, semantic keywords, physical duplicate paths, and privacy controls.",
+            )
+            .font(font_sans(11.0))
+            .color(p.ink_muted),
+        );
+
+        ui.add_space(24.0);
+        Frame::new()
+            .fill(p.bg_surface)
+            .stroke(Stroke::new(1.0, p.border_subtle))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Indexed Files").font(font_sans(11.0)).color(p.ink_muted));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(egui::RichText::new(search_index.items().len().to_string()).font(font_semibold(11.5)).color(p.ink_primary));
+                    });
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Taxonomy Clusters").font(font_sans(11.0)).color(p.ink_muted));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(egui::RichText::new(snapshot.hubs.len().to_string()).font(font_semibold(11.5)).color(p.indigo_bright));
+                    });
+                });
+                ui.add_space(6.0);
+                let dup_count = search_index.items().iter().filter(|i| i.is_duplicate || i.physical_paths.len() > 1).count();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Duplicates Tracked").font(font_sans(11.0)).color(p.ink_muted));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(egui::RichText::new(dup_count.to_string()).font(font_semibold(11.5)).color(p.copper_bright));
+                    });
+                });
+            });
+    });
+}
+
+fn render_chip_button(ui: &mut Ui, label: &str, accent: Color32, p: &ThemePalette) -> bool {
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        font_mono(10.0),
+        p.ink_primary,
+    );
+    let size = Vec2::new(galley.size().x + 14.0, 20.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+
+    let fill = if resp.hovered() {
+        with_alpha(accent, 60)
+    } else {
+        with_alpha(accent, 25)
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(4),
+        Stroke::new(1.0, with_alpha(accent, 120)),
+        StrokeKind::Inside,
+    );
+    ui.painter().galley(rect.center() - galley.size() * 0.5, galley, Color32::TRANSPARENT);
+
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}

@@ -123,6 +123,10 @@ impl DocumentIndex {
         Some(format!("{:x}", hasher.finalize()))
     }
 
+    pub fn items(&self) -> &[IndexItem] {
+        &self.items
+    }
+
     pub fn find_by_hash(&self, hash: &str) -> Option<&IndexItem> {
         self.items.iter().find(|item| item.hash == hash)
     }
@@ -246,6 +250,36 @@ impl DocumentIndex {
         }
 
         let query_terms: Vec<&str> = query_clean.split_whitespace().collect();
+        let mut filter_dup = false;
+        let mut filter_symbols = Vec::new();
+        let mut filter_keywords = Vec::new();
+        let mut filter_cats = Vec::new();
+        let mut plain_terms = Vec::new();
+
+        for term in &query_terms {
+            if *term == "is:dup" || *term == "dup:" || *term == "•" {
+                filter_dup = true;
+            } else if let Some(cat) = term.strip_prefix("@cat:") {
+                if !cat.is_empty() {
+                    filter_cats.push(cat);
+                }
+            } else if let Some(sym) = term
+                .strip_prefix("@fn:")
+                .or_else(|| term.strip_prefix("@var:"))
+                .or_else(|| term.strip_prefix('@'))
+            {
+                if !sym.is_empty() {
+                    filter_symbols.push(sym);
+                }
+            } else if let Some(kw) = term.strip_prefix('#') {
+                if !kw.is_empty() {
+                    filter_keywords.push(kw);
+                }
+            } else {
+                plain_terms.push(*term);
+            }
+        }
+
         let mut exact_matches = Vec::new();
         let mut fuzzy_matches = Vec::new();
 
@@ -256,56 +290,111 @@ impl DocumentIndex {
             let kws_lower: Vec<String> = item.keywords.iter().map(|k| k.to_lowercase()).collect();
             let symbols_lower: Vec<String> = item.symbols.iter().map(|s| s.to_lowercase()).collect();
 
+            // 1. Strict filter checks if specific prefixes were specified
+            if filter_dup && (!item.is_duplicate && item.physical_paths.len() <= 1) {
+                continue;
+            }
+            if !filter_cats.is_empty() && !filter_cats.iter().any(|c| cat_lower.contains(c)) {
+                continue;
+            }
+            if !filter_symbols.is_empty()
+                && !filter_symbols
+                    .iter()
+                    .any(|s| symbols_lower.iter().any(|sym| sym.contains(s)))
+            {
+                continue;
+            }
+            if !filter_keywords.is_empty()
+                && !filter_keywords
+                    .iter()
+                    .any(|k| kws_lower.iter().any(|kw| kw.contains(k)))
+            {
+                continue;
+            }
+
             let mut score: f64 = 0.0;
             let mut match_type = "partial";
 
-            if cat_lower.contains(&query_clean) {
-                score = score.max(1.0);
-                match_type = "exact";
-            }
-            if file_lower.contains(&query_clean) {
-                score = score.max(0.95);
-                match_type = "exact";
-            }
-            if symbols_lower.iter().any(|s| s == &query_clean) {
-                score = score.max(0.96);
-                match_type = "exact";
-            } else if symbols_lower.iter().any(|s| s.contains(&query_clean)) {
-                score = score.max(0.91);
-                match_type = "exact";
-            }
-            if kws_lower.iter().any(|k| k.contains(&query_clean)) {
-                score = score.max(0.9);
-                match_type = "exact";
-            }
-            let is_path_query = query_clean.contains('/') || query_clean.contains('\\');
-            if (is_path_query && path_lower.contains(&query_clean))
-                || (!is_path_query
-                    && query_clean.len() >= 4
-                    && Path::new(&item.path)
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_lowercase())
-                        .as_deref()
-                        == Some(&query_clean))
+            // If query consists entirely of valid prefix filters that passed
+            if plain_terms.is_empty()
+                && (filter_dup
+                    || !filter_symbols.is_empty()
+                    || !filter_keywords.is_empty()
+                    || !filter_cats.is_empty())
             {
-                score = score.max(0.85);
+                score = 0.95;
+                match_type = "filter";
             }
 
-            let term_hits = query_terms
-                .iter()
-                .filter(|&t| {
-                    cat_lower.contains(t)
-                        || file_lower.contains(t)
-                        || kws_lower.iter().any(|k| k.contains(t))
-                        || symbols_lower.iter().any(|s| s.contains(t))
-                })
-                .count();
+            // Keyword and symbol boosts
+            if !filter_symbols.is_empty() {
+                if filter_symbols.iter().any(|s| symbols_lower.iter().any(|sym| sym == s)) {
+                    score = score.max(0.98);
+                    match_type = "exact_symbol";
+                } else {
+                    score = score.max(0.92);
+                }
+            }
+            if !filter_keywords.is_empty() {
+                if filter_keywords.iter().any(|k| kws_lower.iter().any(|kw| kw == k)) {
+                    score = score.max(0.97);
+                    match_type = "exact_kw";
+                } else {
+                    score = score.max(0.91);
+                }
+            }
 
-            if term_hits > 0 {
-                let term_score = 0.7 + (term_hits as f64 / query_terms.len() as f64) * 0.25;
-                score = score.max(term_score);
+            // Plain term matches
+            if !plain_terms.is_empty() {
+                let joined_plain = plain_terms.join(" ");
+                if cat_lower.contains(&joined_plain) {
+                    score = score.max(1.0);
+                    match_type = "exact";
+                }
+                if file_lower.contains(&joined_plain) {
+                    score = score.max(0.95);
+                    match_type = "exact";
+                }
+                if symbols_lower.iter().any(|s| s == &joined_plain) {
+                    score = score.max(0.96);
+                    match_type = "exact";
+                } else if symbols_lower.iter().any(|s| s.contains(&joined_plain)) {
+                    score = score.max(0.91);
+                    match_type = "exact";
+                }
+                if kws_lower.iter().any(|k| k.contains(&joined_plain)) {
+                    score = score.max(0.9);
+                    match_type = "exact";
+                }
+                let is_path_query = joined_plain.contains('/') || joined_plain.contains('\\');
+                if (is_path_query && path_lower.contains(&joined_plain))
+                    || (!is_path_query
+                        && joined_plain.len() >= 4
+                        && Path::new(&item.path)
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_lowercase())
+                            .as_deref()
+                            == Some(&joined_plain))
+                {
+                    score = score.max(0.85);
+                }
+
+                let term_hits = plain_terms
+                    .iter()
+                    .filter(|&t| {
+                        cat_lower.contains(t)
+                            || file_lower.contains(t)
+                            || kws_lower.iter().any(|k| k.contains(t))
+                            || symbols_lower.iter().any(|s| s.contains(t))
+                    })
+                    .count();
+
+                if term_hits > 0 {
+                    let term_score = 0.7 + (term_hits as f64 / plain_terms.len() as f64) * 0.25;
+                    score = score.max(term_score);
+                }
             }
 
             if score > 0.0 {
@@ -314,13 +403,14 @@ impl DocumentIndex {
                     score,
                     match_type: match_type.to_string(),
                 });
-            } else {
+            } else if !plain_terms.is_empty() {
+                let joined_plain = plain_terms.join(" ");
                 let best_sim = kws_lower
                     .iter()
-                    .map(|k| strsim::jaro_winkler(&query_clean, k))
-                    .chain(symbols_lower.iter().map(|s| strsim::jaro_winkler(&query_clean, s)))
-                    .chain(std::iter::once(strsim::jaro_winkler(&query_clean, &file_lower)))
-                    .chain(std::iter::once(strsim::jaro_winkler(&query_clean, &cat_lower)))
+                    .map(|k| strsim::jaro_winkler(&joined_plain, k))
+                    .chain(symbols_lower.iter().map(|s| strsim::jaro_winkler(&joined_plain, s)))
+                    .chain(std::iter::once(strsim::jaro_winkler(&joined_plain, &file_lower)))
+                    .chain(std::iter::once(strsim::jaro_winkler(&joined_plain, &cat_lower)))
                     .fold(0.0f64, |acc, v| acc.max(v));
 
                 if best_sim >= 0.70 {
@@ -459,5 +549,57 @@ mod tests {
         // Virtual pointers auto-computed
         assert!(!canonical.virtual_paths.is_empty());
         assert!(canonical.virtual_paths[0].starts_with("Study Materials/Calculus/"));
+    }
+
+    #[test]
+    fn test_structured_query_grammar() {
+        let items = vec![
+            IndexItem {
+                file: "10.py".to_string(),
+                category: "Code/Vision".to_string(),
+                keywords: vec!["computer vision".to_string(), "opencv".to_string()],
+                symbols: vec!["sobel_x".to_string(), "sobel_y".to_string(), "image_path".to_string()],
+                path: "/home/maddy/Dl/10.py".to_string(),
+                hash: "h10".to_string(),
+                indexed_at: None,
+                virtual_paths: Vec::new(),
+                physical_paths: vec!["/home/maddy/Dl/10.py".to_string()],
+                is_duplicate: false,
+            },
+            IndexItem {
+                file: "1.py".to_string(),
+                category: "Code/Math".to_string(),
+                keywords: vec!["calculator".to_string(), "arithmetic".to_string()],
+                symbols: vec!["add".to_string(), "subtract".to_string()],
+                path: "/home/maddy/Dl/1.py".to_string(),
+                hash: "h1".to_string(),
+                indexed_at: None,
+                virtual_paths: Vec::new(),
+                physical_paths: vec!["/home/maddy/Dl/1.py".to_string(), "/home/maddy/Downloads/1.py".to_string()],
+                is_duplicate: true,
+            },
+        ];
+
+        let index = DocumentIndex::from_items(items);
+
+        // 1. Filter by duplicate badge/tag
+        let dups = index.search("is:dup", 10);
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].item.file, "1.py");
+
+        // 2. Filter by AST function symbol
+        let sym_search = index.search("@fn:sobel_x", 10);
+        assert_eq!(sym_search.len(), 1);
+        assert_eq!(sym_search[0].item.file, "10.py");
+
+        // 3. Filter by keyword chip
+        let kw_search = index.search("#opencv", 10);
+        assert_eq!(kw_search.len(), 1);
+        assert_eq!(kw_search[0].item.file, "10.py");
+
+        // 4. Combined query: category filter + plain term
+        let cat_search = index.search("@cat:vision sobel", 10);
+        assert_eq!(cat_search.len(), 1);
+        assert_eq!(cat_search[0].item.file, "10.py");
     }
 }

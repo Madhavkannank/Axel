@@ -4,8 +4,8 @@ use crate::desktop::theme::{
     draw_icon_chevron_right, draw_icon_close, draw_icon_crosshair, draw_icon_file_type,
     draw_icon_folder, draw_icon_galaxy, draw_icon_gear, draw_icon_grid, draw_icon_links,
     draw_icon_maximize, draw_icon_menu, draw_icon_minimize, draw_icon_palette, draw_icon_refresh,
-    draw_icon_search, draw_icon_upload, font_medium, font_mono, font_sans, font_semibold,
-    lerp_color, palette, with_alpha, ThemePreset,
+    draw_icon_search, draw_icon_upload, draw_icon_workstation, font_medium, font_mono, font_sans,
+    font_semibold, lerp_color, palette, with_alpha, ThemePreset,
 };
 use crate::engine::ActivityEntry;
 use chrono::{DateTime, Utc};
@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
+    Workstation,
     Galaxy,
     ClusterGrid,
 }
@@ -47,10 +48,12 @@ pub enum PanelAction {
     SelectHub(String),
     SetCategoryFilter(Option<String>),
     SearchQueryChanged(String),
+    AppendSearchToken(String),
     CloseSearchPopover,
     OpenFileExternal(String),
     RevealFolderExternal(String),
     DeleteDocument { hash: String, delete_file: bool },
+    TrashDuplicateFile { canonical_hash: String, trash_path: String },
     CloseInspector,
     CloseTelemetry,
     CycleDropDock(isize),
@@ -456,6 +459,16 @@ pub fn render_left_rail(
 
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 10.0;
+
+                if rail_btn(
+                    ui,
+                    "Workstation (3-Column Ledger)",
+                    view_mode == ViewMode::Workstation,
+                    true,
+                    |painter, c, col| draw_icon_workstation(painter, c, 18.0, col),
+                ) {
+                    action = PanelAction::SetViewMode(ViewMode::Workstation);
+                }
 
                 if rail_btn(
                     ui,

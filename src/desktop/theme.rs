@@ -645,3 +645,61 @@ pub fn draw_icon_chevron_down(p: &Painter, c: Pos2, s: f32, color: Color32) {
     p.line_segment([Pos2::new(c.x - dx, c.y - dy), Pos2::new(c.x, c.y + dy)], st);
     p.line_segment([Pos2::new(c.x, c.y + dy), Pos2::new(c.x + dx, c.y - dy)], st);
 }
+
+pub fn draw_icon_workstation(p: &Painter, c: Pos2, s: f32, color: Color32) {
+    let st = Stroke::new(1.4, color);
+    let rect = Rect::from_center_size(c, Vec2::new(s * 0.85, s * 0.68));
+    p.rect_stroke(rect, CornerRadius::same(3), st, StrokeKind::Inside);
+    let col1_x = rect.left() + rect.width() * 0.28;
+    let col2_x = rect.left() + rect.width() * 0.70;
+    p.line_segment([Pos2::new(col1_x, rect.top()), Pos2::new(col1_x, rect.bottom())], st);
+    p.line_segment([Pos2::new(col2_x, rect.top()), Pos2::new(col2_x, rect.bottom())], st);
+}
+
+pub fn draw_icon_shield(p: &Painter, c: Pos2, s: f32, color: Color32) {
+    let st = Stroke::new(1.4, color);
+    let w = s * 0.36;
+    let h_top = s * 0.32;
+    let h_bot = s * 0.40;
+    let pts = vec![
+        Pos2::new(c.x - w, c.y - h_top),
+        Pos2::new(c.x + w, c.y - h_top),
+        Pos2::new(c.x + w, c.y + h_bot * 0.2),
+        Pos2::new(c.x, c.y + h_bot),
+        Pos2::new(c.x - w, c.y + h_bot * 0.2),
+        Pos2::new(c.x - w, c.y - h_top),
+    ];
+    p.add(egui::Shape::line(pts, st));
+    p.line_segment([Pos2::new(c.x, c.y - h_top), Pos2::new(c.x, c.y + h_bot * 0.7)], st);
+}
+
+pub fn draw_icon_trash(p: &Painter, c: Pos2, s: f32, color: Color32) {
+    let st = Stroke::new(1.3, color);
+    let w = s * 0.26;
+    let h = s * 0.32;
+    // Lid
+    p.line_segment(
+        [Pos2::new(c.x - w * 1.25, c.y - h), Pos2::new(c.x + w * 1.25, c.y - h)],
+        st,
+    );
+    p.line_segment(
+        [Pos2::new(c.x - w * 0.45, c.y - h * 1.25), Pos2::new(c.x + w * 0.45, c.y - h * 1.25)],
+        st,
+    );
+    // Can body
+    p.line_segment(
+        [Pos2::new(c.x - w, c.y - h), Pos2::new(c.x - w * 0.85, c.y + h)],
+        st,
+    );
+    p.line_segment(
+        [Pos2::new(c.x + w, c.y - h), Pos2::new(c.x + w * 0.85, c.y + h)],
+        st,
+    );
+    p.line_segment(
+        [Pos2::new(c.x - w * 0.85, c.y + h), Pos2::new(c.x + w * 0.85, c.y + h)],
+        st,
+    );
+    // Grooves
+    p.line_segment([Pos2::new(c.x - w * 0.35, c.y - h * 0.6), Pos2::new(c.x - w * 0.30, c.y + h * 0.7)], st);
+    p.line_segment([Pos2::new(c.x + w * 0.35, c.y - h * 0.6), Pos2::new(c.x + w * 0.30, c.y + h * 0.7)], st);
+}

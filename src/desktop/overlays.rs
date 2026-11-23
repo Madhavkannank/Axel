@@ -1057,6 +1057,71 @@ pub fn render_inspector_drawer(
 
                     ui.add_space(10.0);
 
+                    if detail.item.physical_paths.len() > 1 || detail.item.is_duplicate {
+                        ui.label(
+                            egui::RichText::new("Physical Copies & Deduplication")
+                                .font(font_medium(11.0))
+                                .color(p.copper_bright),
+                        );
+                        ui.add_space(4.0);
+                        for (idx, ppath) in detail.item.physical_paths.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let is_primary = idx == 0;
+                                let prefix = if is_primary { "1. " } else { "2. " };
+                                ui.label(
+                                    egui::RichText::new(format!("{}{}", prefix, truncate_label(ppath, 26)))
+                                        .font(font_mono(10.5))
+                                        .color(if is_primary { p.ink_primary } else { p.copper_bright }),
+                                );
+                                if !is_primary {
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        let (trash_rect, trash_resp) =
+                                            ui.allocate_exact_size(Vec2::new(48.0, 19.0), Sense::click());
+                                        let tr_bg = if trash_resp.hovered() {
+                                            p.danger
+                                        } else {
+                                            with_alpha(p.danger, 45)
+                                        };
+                                        ui.painter().rect_filled(trash_rect, CornerRadius::same(4), tr_bg);
+                                        ui.painter().text(
+                                            trash_rect.center(),
+                                            Align2::CENTER_CENTER,
+                                            "Trash",
+                                            font_medium(10.0),
+                                            if trash_resp.hovered() { Color32::WHITE } else { p.danger },
+                                        );
+                                        if trash_resp.clicked() {
+                                            action = PanelAction::TrashDuplicateFile {
+                                                canonical_hash: detail.item.hash.clone(),
+                                                trash_path: ppath.clone(),
+                                            };
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                        ui.add_space(8.0);
+                    }
+
+                    if !detail.item.symbols.is_empty() {
+                        ui.label(
+                            egui::RichText::new("Extracted AST Symbols")
+                                .font(font_medium(11.0))
+                                .color(p.ink_muted),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
+                            for sym in &detail.item.symbols {
+                                let sym_chip = format!("@{}", sym);
+                                if filter_chip(ui, &sym_chip, false, p.indigo) {
+                                    action = PanelAction::AppendSearchToken(sym_chip);
+                                }
+                            }
+                        });
+                        ui.add_space(10.0);
+                    }
+
                     if !detail.item.keywords.is_empty() {
                         ui.label(
                             egui::RichText::new("Extracted Keywords")
@@ -1067,8 +1132,9 @@ pub fn render_inspector_drawer(
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
                             for kw in &detail.item.keywords {
-                                if filter_chip(ui, kw, false, accent) {
-                                    action = PanelAction::SearchQueryChanged(kw.clone());
+                                let kw_chip = format!("#{}", kw);
+                                if filter_chip(ui, &kw_chip, false, accent) {
+                                    action = PanelAction::AppendSearchToken(kw_chip);
                                 }
                             }
                         });
@@ -1082,25 +1148,82 @@ pub fn render_inspector_drawer(
                     );
                     ui.add_space(4.0);
 
+                    let is_sensitive = detail.item.category.contains("Identity")
+                        || detail.item.category.contains("Government")
+                        || detail.item.category.contains("Sensitive")
+                        || detail.item.category.contains("Personal");
+
+                    let shield_id = Id::unique(format!("shield_reveal_{}", detail.item.hash));
+                    let is_revealed = ui.ctx().data_mut(|d| d.get_temp::<bool>(shield_id).unwrap_or(false));
+
                     let preview_h = (ui.available_height() - 46.0).max(90.0);
                     Frame::new()
                         .fill(p.bg_void)
-                        .stroke(Stroke::new(1.0, p.border_subtle))
+                        .stroke(Stroke::new(
+                            1.0,
+                            if is_sensitive && !is_revealed {
+                                with_alpha(p.copper_bright, 180)
+                            } else {
+                                p.border_subtle
+                            },
+                        ))
                         .corner_radius(CornerRadius::same(9))
                         .inner_margin(Margin::same(10))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.set_height(preview_h - 20.0);
-                            ScrollArea::vertical()
-                                .id_salt("inspector_preview_scroll")
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
+                            if is_sensitive && !is_revealed {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space((preview_h - 100.0).max(10.0) * 0.4);
                                     ui.label(
-                                        egui::RichText::new(&detail.text_preview)
-                                            .font(font_mono(11.0))
-                                            .color(p.ink_secondary),
+                                        egui::RichText::new("🔒 Privacy Shield Active")
+                                            .font(font_semibold(12.5))
+                                            .color(p.copper_bright),
                                     );
+                                    ui.add_space(2.0);
+                                    ui.label(
+                                        egui::RichText::new("Government ID / Sensitive Personal Data")
+                                            .font(font_sans(10.5))
+                                            .color(p.ink_muted),
+                                    );
+                                    ui.add_space(8.0);
+                                    let (rev_rect, rev_resp) =
+                                        ui.allocate_exact_size(Vec2::new(105.0, 22.0), Sense::click());
+                                    let r_bg = if rev_resp.hovered() {
+                                        p.bg_surface_hover
+                                    } else {
+                                        p.bg_surface
+                                    };
+                                    ui.painter().rect_filled(rev_rect, CornerRadius::same(5), r_bg);
+                                    ui.painter().rect_stroke(
+                                        rev_rect,
+                                        CornerRadius::same(5),
+                                        Stroke::new(1.0, p.border_strong),
+                                        StrokeKind::Inside,
+                                    );
+                                    ui.painter().text(
+                                        rev_rect.center(),
+                                        Align2::CENTER_CENTER,
+                                        "👁 Reveal",
+                                        font_medium(11.0),
+                                        p.ink_primary,
+                                    );
+                                    if rev_resp.clicked() {
+                                        ui.ctx().data_mut(|d| d.insert_temp(shield_id, true));
+                                    }
                                 });
+                            } else {
+                                ScrollArea::vertical()
+                                    .id_salt("inspector_preview_scroll")
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(&detail.text_preview)
+                                                .font(font_mono(11.0))
+                                                .color(p.ink_secondary),
+                                        );
+                                    });
+                            }
                         });
 
                     ui.add_space(10.0);

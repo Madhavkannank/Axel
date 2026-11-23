@@ -38,3 +38,4 @@ chrono = { version = "0.4", features = ["serde"] }
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "x11"] }
 egui = "0.37"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal", "wayland"] }
+trash = "5.4"
