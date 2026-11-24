@@ -5,6 +5,9 @@ edition = "2021"
 authors = ["Madhav Kannan K <madhavkannank@gmail.com>"]
 description = "AXEL: High-Performance Automated Document Extraction & Enhanced Labeling in Rust"
 license = "MIT"
+readme = "README.md"
+keywords = ["document-intelligence", "vector-space-model", "deduplication", "search", "xattr"]
+categories = ["command-line-utilities", "filesystem", "text-processing"]
 
 [lib]
 name = "axel"
