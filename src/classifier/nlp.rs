@@ -153,63 +153,77 @@ pub fn tokenize(text: &str) -> Vec<String> {
 }
 
 /// Normalizes English inflectional suffixes (plurals, gerunds, past tense) to base morphemes.
+/// Uses UTF-8 character-safe suffix stripping to prevent panics on multilingual inputs.
 pub fn stem(word: &str) -> String {
     let w = word.trim().to_lowercase();
-    let len = w.chars().count();
-    if len <= 3 {
+    let char_count = w.chars().count();
+    if char_count <= 3 {
         return w;
     }
 
     // -ies -> -y (summaries -> summary, realities -> reality)
-    if w.ends_with("ies") && len >= 5 {
-        return format!("{}y", &w[..len - 3]);
+    if let Some(prefix) = w.strip_suffix("ies") {
+        if prefix.chars().count() >= 2 {
+            return format!("{prefix}y");
+        }
     }
 
     // -sses -> -ss (classes -> class, processes -> process)
-    if w.ends_with("sses") && len >= 6 {
-        return w[..len - 2].to_string();
+    if let Some(prefix) = w.strip_suffix("sses") {
+        if prefix.chars().count() >= 2 {
+            return format!("{prefix}ss");
+        }
     }
 
     // -ves -> -f or -ve (leaves -> leaf, shelves -> shelf)
-    if w.ends_with("ves") && len >= 5 {
-        return format!("{}f", &w[..len - 3]);
+    if let Some(prefix) = w.strip_suffix("ves") {
+        if prefix.chars().count() >= 2 {
+            return format!("{prefix}f");
+        }
     }
 
     // -es -> base for sibilants (boxes -> box, branches -> branch, invoices -> invoice)
-    if w.ends_with("es") && len >= 5 {
-        let stem = &w[..len - 2];
-        if stem.ends_with("ch") || stem.ends_with("sh") || stem.ends_with('x') || stem.ends_with('z') || stem.ends_with('s') {
-            return stem.to_string();
+    if let Some(prefix) = w.strip_suffix("es") {
+        if prefix.chars().count() >= 3 {
+            if prefix.ends_with("ch")
+                || prefix.ends_with("sh")
+                || prefix.ends_with('x')
+                || prefix.ends_with('z')
+                || prefix.ends_with('s')
+            {
+                return prefix.to_string();
+            }
+            // e.g. invoices -> invoice, slides -> slide: preserve 'e'
+            return format!("{prefix}e");
         }
-        // e.g. invoices -> invoice, slides -> slide
-        return w[..len - 1].to_string();
     }
 
     // -s -> base (notes -> note, lectures -> lecture, algorithms -> algorithm)
-    if w.ends_with('s') && !w.ends_with("ss") && !w.ends_with("us") && !w.ends_with("is") && len >= 4 {
-        return w[..len - 1].to_string();
+    if let Some(prefix) = w.strip_suffix('s') {
+        if !w.ends_with("ss") && !w.ends_with("us") && !w.ends_with("is") && prefix.chars().count() >= 3 {
+            return prefix.to_string();
+        }
     }
 
     // -ing -> base (billing -> bill, recording -> record, consulting -> consult)
-    if w.ends_with("ing") && len >= 6 {
-        let stem = &w[..len - 3];
-        // Handle double consonant (e.g. running -> run, programming -> program)
-        if stem.len() >= 4 {
-            let last_two: Vec<char> = stem.chars().rev().take(2).collect();
+    if let Some(prefix) = w.strip_suffix("ing") {
+        if prefix.chars().count() >= 3 {
+            // Handle double consonant (e.g. running -> run, programming -> program)
+            let last_two: Vec<char> = prefix.chars().rev().take(2).collect();
             if last_two.len() == 2 && last_two[0] == last_two[1] && !matches!(last_two[0], 's' | 'l') {
-                return stem[..stem.len() - 1].to_string();
+                let mut chars: Vec<char> = prefix.chars().collect();
+                chars.pop();
+                return chars.into_iter().collect();
             }
+            return prefix.to_string();
         }
-        return stem.to_string();
     }
 
     // -ed -> base (prescribed -> prescribe, filtered -> filter)
-    if w.ends_with("ed") && len >= 5 {
-        let stem = &w[..len - 2];
-        if stem.ends_with('e') {
-            return stem.to_string();
+    if let Some(prefix) = w.strip_suffix("ed") {
+        if prefix.chars().count() >= 3 {
+            return prefix.to_string();
         }
-        return stem.to_string();
     }
 
     w
@@ -227,14 +241,45 @@ pub fn is_recognized_acronym(word: &str) -> bool {
     get_short_acronyms().contains(lower.as_str())
 }
 
+fn is_vowel(c: char) -> bool {
+    matches!(
+        c,
+        // Latin vowels (basic + accented)
+        'a' | 'e' | 'i' | 'o' | 'u' | 'y'
+        | 'á' | 'é' | 'í' | 'ó' | 'ú' | 'ý'
+        | 'à' | 'è' | 'ì' | 'ò' | 'ù'
+        | 'ä' | 'ë' | 'ï' | 'ö' | 'ü' | 'ÿ'
+        | 'â' | 'ê' | 'î' | 'ô' | 'û'
+        | 'ã' | 'õ' | 'å' | 'æ' | 'ø' | 'œ'
+        // Cyrillic vowels (Russian, Ukrainian, Belarusian, Bulgarian, Serbian)
+        | 'а' | 'е' | 'ё' | 'и' | 'о' | 'у' | 'ы' | 'э' | 'ю' | 'я'
+        | 'і' | 'ї' | 'є' | 'ў'
+        // Greek vowels
+        | 'α' | 'ε' | 'η' | 'ι' | 'ο' | 'υ' | 'ω'
+        | 'ά' | 'έ' | 'ή' | 'ί' | 'ό' | 'ύ' | 'ώ'
+    )
+}
+
+fn is_alphabetic_with_vowels(c: char) -> bool {
+    matches!(
+        c,
+        'a'..='z'
+        | 'A'..='Z'
+        | '\u{00C0}'..='\u{024F}' // Latin Extended A/B
+        | '\u{0400}'..='\u{04FF}' // Cyrillic
+        | '\u{0370}'..='\u{03FF}' // Greek
+    )
+}
+
 /// Validates whether a token is a legitimate natural language or technical term,
 /// rejecting OCR gibberish, extreme consonant/vowel jams, and non-alphanumeric noise.
+/// Uses Unicode script awareness so valid Cyrillic, Greek, Indic, CJK, and accented terms are accepted.
 pub fn is_lexically_valid(word: &str) -> bool {
     let w = word.trim().to_lowercase();
     let len = w.chars().count();
 
     // Length boundary
-    if len < 2 || len > 32 {
+    if len < 2 || len > 40 {
         return false;
     }
 
@@ -262,27 +307,32 @@ pub fn is_lexically_valid(word: &str) -> bool {
         return false;
     }
 
-    // Check vowel-to-consonant plausibility for words length >= 5
-    if len >= 5 {
-        let vowels = chars.iter().filter(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y')).count();
+    // Script-aware vowel-to-consonant plausibility check for alphabetic languages (Latin, Cyrillic, Greek)
+    let has_alphabetic_script = chars.iter().any(|c| is_alphabetic_with_vowels(*c));
+    if has_alphabetic_script && len >= 5 {
+        let vowels = chars.iter().filter(|c| is_vowel(**c)).count();
         // Zero vowels in 5+ letters is almost certainly OCR gibberish or random hash (e.g. "dsdpsuy")
         if vowels == 0 {
             return false;
         }
-        // Vowel ratio too extreme (e.g. 5 vowels out of 6 letters without common diphthongs)
+        // Vowel ratio check (rejects non-words that are almost entirely vowels without standard phonology)
         let vowel_ratio = vowels as f32 / len as f32;
-        if vowel_ratio > 0.85 {
+        if vowel_ratio > 0.90 {
             return false;
         }
 
         // Check for 5 consecutive consonants (e.g. "dsdps")
         let mut consecutive_consonants = 0;
         for &c in &chars {
-            if matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y') {
+            if is_vowel(c) {
                 consecutive_consonants = 0;
             } else if c.is_alphabetic() {
                 consecutive_consonants += 1;
                 if consecutive_consonants >= 5 {
+                    // Allow legitimate natural English coda clusters: "-ngths" (strengths, lengths) and "-lfths" (twelfths)
+                    if consecutive_consonants == 5 && (w.ends_with("ngths") || w.ends_with("lfths")) {
+                        continue;
+                    }
                     return false;
                 }
             }
@@ -338,6 +388,27 @@ mod tests {
     }
 
     #[test]
+    fn test_multilingual_unicode_stemming_never_panics() {
+        // German umlauts and compounds
+        assert_eq!(stem("überflüssiges"), "überflüssige");
+        assert_eq!(stem("verhältnisse"), "verhältnisse");
+        assert_eq!(stem("schönes"), "schöne");
+        // French accents
+        assert_eq!(stem("résumés"), "résumé");
+        assert_eq!(stem("données"), "donnée");
+        // Spanish
+        assert_eq!(stem("niños"), "niño");
+        assert_eq!(stem("organizaciones"), "organizacione");
+        // Indic / Devanagari / Tamil / CJK
+        assert_eq!(stem("प्रणाली"), "प्रणाली");
+        assert_eq!(stem("கோப்புகள்"), "கோப்புகள்");
+        assert_eq!(stem("日本語データ"), "日本語データ");
+        // Emojis and symbols
+        assert_eq!(stem("🚀notes"), "🚀note");
+        assert_eq!(stem("test🔥"), "test🔥");
+    }
+
+    #[test]
     fn test_ocr_gibberish_rejection() {
         assert!(!is_lexically_valid("aeeeth")); // 3 'e's in a row
         assert!(!is_lexically_valid("eeeeseseeete")); // 4 'e's in a row
@@ -352,6 +423,16 @@ mod tests {
         assert!(is_lexically_valid("cv"));
         assert!(is_lexically_valid("qps"));
         assert!(is_lexically_valid("mapreduce"));
+
+        // Multilingual words across world scripts must pass cleanly
+        assert!(is_lexically_valid("документ")); // Russian/Cyrillic: document
+        assert!(is_lexically_valid("алгоритм")); // Russian/Cyrillic: algorithm
+        assert!(is_lexically_valid("πρόγραμμα")); // Greek: program
+        assert!(is_lexically_valid("अध्ययन")); // Hindi: study
+        assert!(is_lexically_valid("நிரலாக்கம்")); // Tamil: programming
+        assert!(is_lexically_valid("自然言語処理")); // Japanese: NLP
+        assert!(is_lexically_valid("résumé")); // French accented
+        assert!(is_lexically_valid("geschäftsbericht")); // German umlaut
     }
 
     #[test]

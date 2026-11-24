@@ -1,6 +1,33 @@
 import json
+import re
 from groq import Groq
 from config import GROQ_API_KEY, MODEL_NAME, MODEL_FALLBACKS
+
+
+def redact_sensitive_data(text):
+    """Shields PII, government IDs, and credentials before cloud transmission (H14)."""
+    if not text:
+        return ""
+    # Redact Aadhaar: 12 digits, often formatted as 4-4-4
+    text = re.sub(r'\b\d{4}\s?\d{4}\s?\d{4}\b', '[REDACTED_AADHAAR]', text)
+    # Redact PAN: 5 letters, 4 digits, 1 letter
+    text = re.sub(r'\b[A-Z]{5}[0-9]{4}[A-Z]\b', '[REDACTED_PAN]', text)
+    # Redact Private Keys and API Keys
+    text = re.sub(r'-----BEGIN (RSA )?PRIVATE KEY-----[\s\S]*?-----END (RSA )?PRIVATE KEY-----', '[REDACTED_PRIVATE_KEY]', text)
+    text = re.sub(r'\b(gsk_|sk_|ghp_|AKIA)[A-Za-z0-9_]{16,}\b', '[REDACTED_KEY]', text)
+    return text
+
+
+def is_identity_document(text, file_name=""):
+    """Detects high-risk government IDs that must never be transmitted to external cloud LLMs (H11/H14)."""
+    combined = (str(text) + " " + str(file_name)).lower()
+    strong_markers = [
+        "aadhaar card", "unique identification authority", "uidai",
+        "income tax department", "permanent account number card", "pan card",
+        "election commission of india", "voter identity card", "epic no",
+        "republic of india passport", "driver license", "driving licence"
+    ]
+    return any(marker in combined for marker in strong_markers)
 
 
 def _is_connection_error(exc):
@@ -88,9 +115,17 @@ def safe_parse_llm_response(response_text):
 def generate_keywords(text, ml_category=None, ml_keywords=None):
     """Sends text to Groq API and returns strict JSON output with model fallback."""
     fallback_response = {"category": "Unknown", "keywords": []}
-    
+
     if not text:
         return fallback_response
+
+    # Privacy shield: Check for high-risk identity documents
+    if is_identity_document(text):
+        print("[PRIVACY] High-risk government identity document detected. Cloud LLM transmission prevented (H14).")
+        return {"category": "Government ID", "keywords": ["identity", "confidential", "local_only"]}
+
+    # Redact PII and credentials before any cloud transmission
+    safe_text = redact_sensitive_data(text)
 
     if _key_missing_or_placeholder():
         print("[WARNING] GROQ_API_KEY missing/placeholder. Using safe fallback.")
@@ -101,7 +136,7 @@ def generate_keywords(text, ml_category=None, ml_keywords=None):
     except Exception as e:
         print(f"[ERROR] Groq Initialisation: {e}")
         return fallback_response
-    
+
     ml_context = ""
     if ml_category and ml_keywords:
         ml_context = f"\n    I already have a machine learning guess:\n    Suggested ML Category: {ml_category}\n    Suggested ML Keywords: {', '.join(ml_keywords)}\n    Use the ML suggestions to guide your output if they seem correct. Otherwise, improve them.\n"
@@ -117,14 +152,14 @@ def generate_keywords(text, ml_category=None, ml_keywords=None):
     Do NOT output any other text or explanation.
 
     Text to analyze:
-    {text}
+    {safe_text}
     """
-    
+
     stricter_prompt = f"""
-    Your previous response failed JSON parsing. 
-    Provide ONLY a valid raw JSON object with EXACTLY the keys "category" (string) and "keywords" (array of strings). 
+    Your previous response failed JSON parsing.
+    Provide ONLY a valid raw JSON object with EXACTLY the keys "category" (string) and "keywords" (array of strings).
     NO markdown formatting, NO explanation, NO backticks.
-    Text: {text}
+    Text: {safe_text}
     """
 
     parsed_data = _request_with_model_fallback(

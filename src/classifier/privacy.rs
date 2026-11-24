@@ -124,30 +124,15 @@ pub fn is_high_risk_identity_document(text: &str, file_name: &str) -> bool {
         || lower_text.contains("social security card")
         || lower_text.contains("social security act");
 
-    let has_passport_context = lower_text.contains("republic of india")
-        || lower_text.contains("passport no")
-        || lower_text.contains("type p");
+    let has_passport_context = (lower_text.contains("passport")
+        && (lower_text.contains("republic of india") || lower_text.contains("type p") || lower_text.contains("passport no")))
+        || lower_text.contains("diplomatic passport");
 
-    let has_voter_context = lower_text.contains("election commission")
-        || lower_text.contains("elector photo identity")
-        || lower_text.contains("voter id");
+    let has_voter_context = (lower_text.contains("voter") || lower_text.contains("elector"))
+        && (lower_text.contains("election commission") || lower_text.contains("elector photo identity") || lower_text.contains("epic no"));
 
-    // If document is clearly a professional resume, curriculum vitae, or academic paper,
-    // it is not a government identity card.
-    let is_resume_or_academic = (lower_text.contains("curriculum vitae")
-        || lower_text.contains("resume")
-        || lower_text.contains("objective")
-        || lower_text.contains("experience")
-        || lower_text.contains("skills")
-        || lower_text.contains("education"))
-        && !has_aadhaar_context
-        && !has_pan_context;
-
-    if is_resume_or_academic {
-        return false;
-    }
-
-    // High risk ID requires genuine issuing context combined with pattern match or identity terms
+    // High risk ID requires genuine issuing context combined with pattern match or identity terms.
+    // We never allow generic resume terms to override genuine government ID indicators (H11).
     if has_aadhaar_context && (get_re_aadhaar().is_match(text) || lower_text.contains("aadhaar") || lower_text.contains("aadhar")) {
         return true;
     }
@@ -162,6 +147,103 @@ pub fn is_high_risk_identity_document(text: &str, file_name: &str) -> bool {
     }
 
     false
+}
+
+static RE_PRIVATE_KEY: OnceLock<Regex> = OnceLock::new();
+static RE_API_KEY: OnceLock<Regex> = OnceLock::new();
+static RE_AWS_KEY: OnceLock<Regex> = OnceLock::new();
+static RE_JWT: OnceLock<Regex> = OnceLock::new();
+static RE_SECRET_ASSIGN: OnceLock<Regex> = OnceLock::new();
+
+/// Redact code secrets (API keys, private keys, authorization tokens, passwords, JWTs)
+/// and PII from source code before any potential cloud transmission (H10).
+pub fn redact_code_secrets_and_pii(input: &str) -> (String, bool) {
+    let mut text = input.to_string();
+    let mut found_secrets = false;
+
+    // 1. Private keys: RSA, EC, OpenSSH, PGP, Generic private keys
+    let re_priv_key = RE_PRIVATE_KEY.get_or_init(|| {
+        Regex::new(r"(?s)-----BEGIN [A-Z0-9_\- ]*PRIVATE KEY-----.*?-----END [A-Z0-9_\- ]*PRIVATE KEY-----")
+            .expect("privkey regex")
+    });
+    if re_priv_key.is_match(&text) {
+        text = re_priv_key.replace_all(&text, "[REDACTED_PRIVATE_KEY]").to_string();
+        found_secrets = true;
+    }
+
+    // 2. High-entropy API keys and tokens (e.g. sk_live_..., ghp_..., xoxb-...)
+    let re_api_key = RE_API_KEY.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:sk_live|sk_test|pk_live|pk_test|ghp|gho|ghu|ghs|ghr|glpat|xoxb|xoxp|xapp|sq0csp)_[A-Za-z0-9_\-]{16,}\b")
+            .expect("apikey regex")
+    });
+    if re_api_key.is_match(&text) {
+        text = re_api_key.replace_all(&text, "[REDACTED_API_KEY]").to_string();
+        found_secrets = true;
+    }
+
+    // 3. AWS Access Key IDs
+    let re_aws = RE_AWS_KEY.get_or_init(|| {
+        Regex::new(r"\bAKIA[0-9A-Z]{16}\b").expect("aws regex")
+    });
+    if re_aws.is_match(&text) {
+        text = re_aws.replace_all(&text, "[REDACTED_AWS_KEY]").to_string();
+        found_secrets = true;
+    }
+
+    // 4. JWT tokens
+    let re_jwt = RE_JWT.get_or_init(|| {
+        Regex::new(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")
+            .expect("jwt regex")
+    });
+    if re_jwt.is_match(&text) {
+        text = re_jwt.replace_all(&text, "[REDACTED_JWT]").to_string();
+        found_secrets = true;
+    }
+
+    // 5. Configured passwords or secrets assigned in code (e.g. dbPassword = "...", api_secret: "...")
+    let re_secret_assign = RE_SECRET_ASSIGN.get_or_init(|| {
+        Regex::new(r#"(?i)\b([A-Za-z0-9_\-]*(?:password|passwd|pwd|secret|auth_token|access_token|api_key|apikey))\s*([:=])\s*["']([^"'\r\n\t]{6,})["']"#)
+            .expect("secret assign regex")
+    });
+    if re_secret_assign.is_match(&text) {
+        text = re_secret_assign
+            .replace_all(&text, |caps: &regex::Captures| {
+                let var = &caps[1];
+                let sep = &caps[2];
+                let val = &caps[3];
+                if val.starts_with("[REDACTED_") {
+                    caps[0].to_string()
+                } else {
+                    format!("{var} {sep} \"[REDACTED_SECRET]\"")
+                }
+            })
+            .to_string();
+        found_secrets = true;
+    }
+
+    // 6. PII redaction (emails, phones, personal names, SSNs, cards)
+    let (sanitized_pii, pii_summary) = redact_sensitive_pii(&text);
+    if pii_summary.total_redactions() > 0 {
+        found_secrets = true;
+    }
+
+    (sanitized_pii, found_secrets)
+}
+
+/// Filters extracted code symbols and tokens to ensure no secrets or credential fragments remain (H10).
+pub fn sanitize_code_symbols(symbols: &[String]) -> Vec<String> {
+    let forbidden_substrings = [
+        "secret", "password", "passwd", "apikey", "api_key", "token", "private_key",
+        "redacted", "credential", "auth_token", "access_token",
+    ];
+    symbols
+        .iter()
+        .filter(|sym| {
+            let lower = sym.to_lowercase();
+            !forbidden_substrings.iter().any(|&f| lower.contains(f))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Redact sensitive PII (Aadhaar, PAN, SSN, Credit Cards, Personal Names, Phone, DOB)
@@ -341,5 +423,45 @@ mod tests {
         assert!(summary.email_count >= 1, "Email must be redacted");
         assert!(redacted.contains("[REDACTED_PHONE]"));
         assert!(redacted.contains("[REDACTED_EMAIL]"));
+    }
+
+    #[test]
+    fn test_redact_code_secrets_and_credentials() {
+        let dummy_key = format!("{}_{}", "sk_test", "1234567890abcdef12345678");
+        let code_sample = format!(
+            r#"
+            // Configuration for backend service
+            const apiKey = "{dummy_key}";
+            const awsKey = "AKIAIOSFODNN7EXAMPLE";
+            const dbPassword = "super_secret_production_password_2026";
+            const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+            const contact = "admin@internal.example.corp";
+
+            function connect() {{
+                console.log("Connecting...");
+            }}
+        "#
+        );
+
+        let (redacted, has_secrets) = redact_code_secrets_and_pii(&code_sample);
+        assert!(has_secrets, "Code containing API keys and passwords must flag has_secrets");
+        assert!(!redacted.contains(&dummy_key));
+        assert!(!redacted.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!redacted.contains("super_secret_production_password_2026"));
+        assert!(!redacted.contains("admin@internal.example.corp"));
+        assert!(redacted.contains("[REDACTED_API_KEY]"));
+        assert!(redacted.contains("[REDACTED_AWS_KEY]"));
+        assert!(redacted.contains("[REDACTED_SECRET]"));
+        assert!(redacted.contains("[REDACTED_EMAIL]"));
+
+        let symbols = vec![
+            "connect".to_string(),
+            "apiKey".to_string(),
+            "dbPassword".to_string(),
+            "authToken".to_string(),
+            "calculateMetrics".to_string(),
+        ];
+        let cleaned = sanitize_code_symbols(&symbols);
+        assert_eq!(cleaned, vec!["connect".to_string(), "calculateMetrics".to_string()]);
     }
 }

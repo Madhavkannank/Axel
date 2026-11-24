@@ -17,7 +17,7 @@ impl KeywordExtractor {
     /// Extract top keywords using normalized token frequency, length salience,
     /// and strict stopword / gibberish rejection.
     pub fn extract(&self, text: &str, max_keywords: usize) -> Vec<String> {
-        let max_k = max_keywords.clamp(3, 10);
+        let max_k = if max_keywords == 0 { 10 } else { max_keywords.min(50) };
         let mut freq: HashMap<String, usize> = HashMap::new();
 
         let tokens = tokenize(text);
@@ -73,18 +73,18 @@ impl KeywordExtractor {
             }
         }
 
-        let max_k = max_keywords.clamp(3, 10);
+        let max_k = if max_keywords == 0 { 10 } else { max_keywords.min(50) };
         if cleaned.len() > max_k {
             cleaned.truncate(max_k);
         }
 
-        if cleaned.len() < 3 && !text.is_empty() {
+        if cleaned.is_empty() && !text.is_empty() {
             let extracted = self.extract(text, max_k);
             for word in extracted {
                 if !cleaned.contains(&word) {
                     cleaned.push(word);
                 }
-                if cleaned.len() >= 3 {
+                if cleaned.len() >= max_k {
                     break;
                 }
             }
@@ -120,5 +120,20 @@ mod tests {
         assert!(!keywords.contains(&"die".to_string()));
         assert!(!keywords.contains(&"der".to_string()));
         assert!(!keywords.contains(&"das".to_string()));
+    }
+
+    #[test]
+    fn test_respects_custom_max_keywords_and_complex_words() {
+        let extractor = KeywordExtractor::new();
+        let text = "The architectural strengths and engineering calculations require database optimization and distributed transaction pipelines.";
+
+        // Should respect max_keywords = 1 without forcing minimum 3 (Audit finding 41)
+        let kw1 = extractor.extract(text, 1);
+        assert_eq!(kw1.len(), 1);
+
+        // Should accept complex natural words like "strengths" (Audit finding 17)
+        assert!(is_lexically_valid("strengths"));
+        assert!(is_lexically_valid("twelfths"));
+        assert!(is_lexically_valid("розробка")); // Ukrainian "development"
     }
 }

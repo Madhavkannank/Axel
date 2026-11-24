@@ -22,10 +22,14 @@ def main():
         'ui/__init__.py', 'ui/file_browser.py', 'ui/processor.py',
         'ui/results_display.py', 'ui/search_widget.py'
     ]
+    all_passed = True
     for f in files:
-        mark = "✓" if os.path.exists(f) else "✗"
+        exists = os.path.exists(f)
+        if not exists and f != 'axel_index.json':
+            all_passed = False
+        mark = "✓" if exists else "✗"
         print(f"  {mark} {f}")
-    
+
     # UI Components
     print("\nUI COMPONENTS:")
     components = [
@@ -39,9 +43,10 @@ def main():
         try:
             __import__(module)
             print(f"  ✓ {name}")
-        except:
+        except Exception:
+            all_passed = False
             print(f"  ✗ {name}")
-    
+
     # Core Imports
     print("\nCORE MODULES:")
     tests = [
@@ -53,15 +58,19 @@ def main():
         try:
             __import__(module)
             print(f"  ✓ {name}")
-        except:
+        except Exception:
+            all_passed = False
             print(f"  ✗ {name}")
-    
+
     print("\n" + "=" * 60)
-    print("STATUS: ✅ Desktop application is ready to launch!")
-    print("\nTo start the application:")
-    print("  python launcher.py\n")
-    
-    return 0
+    if all_passed:
+        print("STATUS: ✅ Desktop application is ready to launch!")
+        print("\nTo start the application:")
+        print("  python launcher.py\n")
+        return 0
+    else:
+        print("STATUS: ⚠️ Some components or dependencies could not be imported.")
+        return 1
 
 if __name__ == "__main__":
     try:

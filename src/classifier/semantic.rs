@@ -92,6 +92,15 @@ static DOMAIN_SPACES: &[DomainConceptSpace] = &[
             "photography", "render", "visual", "graphic", "snapshot", "media",
         ],
     },
+    DomainConceptSpace {
+        name: "Identity",
+        default_subtopic: "Credentials",
+        canonical_terms: &[
+            "aadhaar", "uidai", "pan", "passport", "voter", "ssn", "identification",
+            "citizen", "identity", "government", "resident", "elector", "license",
+            "nationality", "citizenship", "credentials", "card", "authority",
+        ],
+    },
 ];
 
 /// Document form descriptors representing the medium/type rather than the subject matter.
@@ -285,8 +294,10 @@ impl DynamicSemanticClassifier {
 
         // 6. Dynamic Category & Subtopic Resolution
         let (category, dynamic_subtopic) = if let Some(&(space, score, ref dominant_term)) = best_match {
-            // Guard: Images and audio files cannot be categorized into text-only domains without media evidence
-            let is_incompatible_media = (is_image || is_audio) && space.name != "Media";
+            // Guard: Media files without substantial document text evidence stay under Media domain.
+            // Scanned images with rich OCR text (receipts, IDs, documents) can match semantic domains (H11).
+            let has_document_text = !text.trim().is_empty() && text.trim().len() >= 20;
+            let is_incompatible_media = (is_image || is_audio) && (!has_document_text || score < 0.05) && space.name != "Media";
 
             if score > 0.02 && !is_incompatible_media {
                 let subtopic = if let Some(ref term) = dominant_term {

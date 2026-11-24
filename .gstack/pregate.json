@@ -1,0 +1,13 @@
+{
+  "$schema": "https://github.com/garrytan/gstack/docs/pregate.md#pregate-v1",
+  "runner": "sh -c 'cargo test --all-targets' {files}",
+  "dependencies": {
+    ".env.example": [],
+    "Cargo.lock": [],
+    "check_ready.py": [],
+    "ui/app.js": [],
+    "run_test.py": [],
+    "test_desktop_app.py": []
+  },
+  "empty_lanes": ["docs/no-tests"]
+}

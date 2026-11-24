@@ -12,6 +12,9 @@ pub struct Config {
     pub max_keywords: usize,
     pub top_k_results: usize,
     pub port: u16,
+    pub host: String,
+    pub api_token: Option<String>,
+    pub allowed_origins: Vec<String>,
 }
 
 impl Default for Config {
@@ -29,6 +32,9 @@ impl Default for Config {
             max_keywords: 10,
             top_k_results: 5,
             port: 8765,
+            host: "127.0.0.1".to_string(),
+            api_token: None,
+            allowed_origins: Vec::new(),
         }
     }
 }
@@ -38,12 +44,22 @@ impl Config {
         // Attempt to load .env, but never panic if missing
         let _ = dotenvy::dotenv();
 
+        let is_placeholder = |val: &str| -> bool {
+            let lower = val.to_lowercase();
+            lower.contains("your-")
+                || lower.contains("placeholder")
+                || lower.contains("gsk_your_groq_api_key_here")
+                || lower.contains("example")
+        };
+
         let groq_api_key = std::env::var("GROQ_API_KEY")
+            .or_else(|_| std::env::var("AXEL_GROQ_API_KEY"))
             .ok()
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty() && s != "your-groq-api-key-here");
+            .filter(|s| !s.is_empty() && !is_placeholder(s));
 
-        let model_name = std::env::var("MODEL_NAME")
+        let model_name = std::env::var("AXEL_MODEL_NAME")
+            .or_else(|_| std::env::var("MODEL_NAME"))
             .unwrap_or_else(|_| "qwen/qwen3.8-27b".to_string());
 
         let model_fallbacks = std::env::var("AXEL_GROQ_FALLBACK_MODELS")
@@ -62,11 +78,17 @@ impl Config {
             });
 
         let raw_input_folder = std::env::var("AXEL_INPUT_FOLDER")
+            .or_else(|_| std::env::var("AXEL_WATCH_DIR"))
+            .or_else(|_| std::env::var("AXEL_INPUT_DIR"))
+            .or_else(|_| std::env::var("INPUT_FOLDER"))
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./documents"));
         let input_folder = resolve_workspace_path(&raw_input_folder);
 
         let raw_index_file = std::env::var("AXEL_INDEX_FILE")
+            .or_else(|_| std::env::var("AXEL_INDEX_PATH"))
+            .or_else(|_| std::env::var("INDEX_FILE"))
+            .or_else(|_| std::env::var("INDEX_PATH"))
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("axel_index.json"));
         let index_file = resolve_workspace_path(&raw_index_file);
@@ -83,9 +105,31 @@ impl Config {
 
         let port = std::env::var("PORT")
             .or_else(|_| std::env::var("AXEL_PORT"))
+            .or_else(|_| std::env::var("AXEL_SERVER_PORT"))
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(8765);
+
+        let host = std::env::var("AXEL_HOST")
+            .or_else(|_| std::env::var("HOST"))
+            .unwrap_or_else(|_| "127.0.0.1".to_string());
+
+        let api_token = std::env::var("AXEL_API_KEY")
+            .or_else(|_| std::env::var("AXEL_TOKEN"))
+            .or_else(|_| std::env::var("AXEL_API_TOKEN"))
+            .or_else(|_| std::env::var("API_TOKEN"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && !is_placeholder(s));
+
+        let allowed_origins = std::env::var("AXEL_ALLOWED_ORIGINS")
+            .map(|val| {
+                val.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Self {
             groq_api_key,
@@ -96,6 +140,9 @@ impl Config {
             max_keywords,
             top_k_results,
             port,
+            host,
+            api_token,
+            allowed_origins,
         }
     }
 }

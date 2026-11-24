@@ -46,14 +46,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         run_watch(&target_dir, &config).await?;
                     }
                     Commands::Search { query, limit } => {
-                        run_search(&query, limit, &config)?;
+                        let eff_limit = limit.unwrap_or(config.top_k_results);
+                        run_search(&query, eff_limit, &config)?;
                     }
                     Commands::Process { file } => {
                         run_process(&file, &config).await?;
                     }
-                    Commands::Serve { port, no_open } => {
+                    Commands::Serve { port, host, token, no_open } => {
                         if let Some(p) = port {
                             config.port = p;
+                        }
+                        if host != "127.0.0.1" || config.host == "127.0.0.1" {
+                            config.host = host;
+                        }
+                        if let Some(t) = token {
+                            config.api_token = Some(t);
                         }
                         server::run_server(config, !no_open).await?;
                     }
@@ -136,6 +143,14 @@ async fn run_scan(
     println!("Scan Complete!");
     println!("  Indexed: {}", summary.indexed.to_string().green().bold());
     println!("  Skipped: {}", summary.skipped.to_string().dimmed());
+    if summary.truncated {
+        println!(
+            "  {}",
+            "⚠️ Traversal ceiling reached (some files were not visited). Set AXEL_MAX_SCAN_FILES or AXEL_MAX_SCAN_DEPTH to expand."
+                .yellow()
+                .bold()
+        );
+    }
     println!(
         "  Total in Index: {}",
         index.count().to_string().cyan().bold()
@@ -301,20 +316,67 @@ async fn run_check(config: &Config) {
     println!("║             AXEL System Health Check                 ║");
     println!("╚══════════════════════════════════════════════════════╝\n");
 
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
     println!("Configuration:");
     println!("  Active Model:   {}", config.model_name.cyan());
     println!("  Input Folder:   {}", config.input_folder.display());
     println!("  Index File:     {}", config.index_file.display());
+    println!("  Host Binding:   {}", config.host.cyan());
     println!("  Web UI Port:    {}", config.port);
 
+    if !config.input_folder.exists() {
+        warnings.push(format!(
+            "Input folder does not exist yet: {} (will be created automatically on scan/upload)",
+            config.input_folder.display()
+        ));
+    }
+
+    if let Some(parent) = config.index_file.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                errors.push(format!(
+                    "Cannot write index to parent directory {}: {e}",
+                    parent.display()
+                ));
+            }
+        }
+    }
+
+    // Network bind pre-check
+    let test_addr = format!("{}:{}", config.host, config.port);
+    match std::net::TcpListener::bind(&test_addr) {
+        Ok(listener) => {
+            drop(listener);
+        }
+        Err(e) => {
+            warnings.push(format!(
+                "Port {} on {} appears busy or restricted: {e}",
+                config.port, config.host
+            ));
+        }
+    }
+
+    if config.api_token.is_some() {
+        println!("  API Token:      {}", "Configured".green().bold());
+    } else {
+        println!("  API Token:      {}", "Auto-generated session token on launch".yellow());
+    }
+
     print!("  Groq API Key:   ");
-    if config.groq_api_key.is_some() {
-        println!(
-            "{}",
-            "Configured (Groq dynamic semantic intelligence enabled)"
-                .green()
-                .bold()
-        );
+    if let Some(ref key) = config.groq_api_key {
+        if key.starts_with("gsk_") || key.len() >= 20 {
+            println!(
+                "{}",
+                "Configured (Groq dynamic semantic intelligence enabled)"
+                    .green()
+                    .bold()
+            );
+        } else {
+            println!("{}", "Warning: Key format unusual (might be invalid)".yellow());
+            warnings.push("Groq API key format unusual; verify your key at console.groq.com".to_string());
+        }
     } else {
         println!(
             "{}",
@@ -343,12 +405,30 @@ async fn run_check(config: &Config) {
         index.count().to_string().cyan().bold()
     );
 
-    println!(
-        "\n{}",
-        "Status: ✅ AXEL Rust Engine is ready for production!"
-            .green()
-            .bold()
-    );
+    if !warnings.is_empty() {
+        println!("\n{}", "Warnings:".yellow().bold());
+        for w in &warnings {
+            println!("  ⚠️  {}", w.yellow());
+        }
+    }
+
+    if !errors.is_empty() {
+        println!("\n{}", "Errors:".red().bold());
+        for e in &errors {
+            println!("  ❌ {}", e.red());
+        }
+    }
+
+    println!("\n{}", "══════════════════════════════════════════════════════".dimmed());
+    if !errors.is_empty() {
+        println!("{}", "Status: ❌ AXEL has configuration errors that need resolution.".red().bold());
+    } else if !warnings.is_empty() {
+        println!("{}", "Status: ⚠️  AXEL is ready with non-fatal warnings.".yellow().bold());
+    } else {
+        println!("{}", "Status: ✅ AXEL Rust Engine is ready for production!".green().bold());
+    }
+    println!("══════════════════════════════════════════════════════\n");
+
     println!("To launch Desktop App: cargo run");
     println!("To launch Web API:     cargo run -- serve");
     println!("To scan folder:        cargo run -- scan\n");

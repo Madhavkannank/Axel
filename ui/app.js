@@ -28,6 +28,22 @@
     lastFocusedEl: null,
   };
 
+  const apiToken = (() => {
+    const meta = document.querySelector('meta[name="axel-token"]');
+    if (meta && meta.content) return meta.content;
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get('token') || '';
+  })();
+
+  function apiFetch(url, options = {}) {
+    const opts = { ...options };
+    opts.headers = new Headers(opts.headers || {});
+    if (apiToken && !opts.headers.has('Authorization')) {
+      opts.headers.set('Authorization', `Bearer ${apiToken}`);
+    }
+    return fetch(url, opts);
+  }
+
   const el = {
     shell: document.getElementById('nexusShell'),
     windowMeta: document.getElementById('windowMeta'),
@@ -768,7 +784,7 @@
 
   async function fetchGraphAndStats() {
     try {
-      const [graphRes, statsRes] = await Promise.all([fetch('/api/graph'), fetch('/api/stats')]);
+      const [graphRes, statsRes] = await Promise.all([apiFetch('/api/graph'), apiFetch('/api/stats')]);
       if (!graphRes.ok) throw new Error('Failed to load graph');
       state.graph = await graphRes.json();
       if (statsRes.ok) state.stats = await statsRes.json();
@@ -802,7 +818,7 @@
     }
 
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=12`);
+      const res = await apiFetch(`/api/search?q=${encodeURIComponent(q)}&limit=12`);
       const data = await res.json();
       state.searchMatches = new Map(data.results.map((r) => [r.item.hash, r]));
       el.searchSummary.textContent = `${data.total} semantic ${data.total === 1 ? 'match' : 'matches'} for "${q}"`;
@@ -836,7 +852,7 @@
     renderActivityStream();
 
     try {
-      const res = await fetch(`/api/documents/${encodeURIComponent(hash)}`);
+      const res = await apiFetch(`/api/documents/${encodeURIComponent(hash)}`);
       if (!res.ok) throw new Error('Document not found');
       const data = await res.json();
       const item = data.item;
@@ -862,7 +878,9 @@
       });
 
       el.modalDocPreview.textContent = data.text_preview || '(No extractable text content)';
-      el.btnDownloadRaw.href = `/api/documents/${encodeURIComponent(hash)}/raw`;
+      let rawUrl = `/api/documents/${encodeURIComponent(hash)}/raw`;
+      if (apiToken) rawUrl += `?token=${encodeURIComponent(apiToken)}`;
+      el.btnDownloadRaw.href = rawUrl;
       el.btnDownloadRaw.classList.toggle('hidden', !data.file_exists);
       el.btnDeleteDoc.dataset.hash = hash;
       el.btnFocusInGalaxy.dataset.hash = hash;
@@ -905,7 +923,7 @@
 
   async function triggerScan() {
     try {
-      const res = await fetch('/api/scan', { method: 'POST' });
+      const res = await apiFetch('/api/scan', { method: 'POST' });
       const data = await res.json();
       showToast(`Scan complete: ${data.indexed} indexed, ${data.skipped} unchanged`);
       await fetchGraphAndStats();
@@ -924,7 +942,7 @@
     files.forEach((f) => form.append('file', f));
 
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body: form });
+      const res = await apiFetch('/api/upload', { method: 'POST', body: form });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       showToast(`Indexed ${data.count} ${data.count === 1 ? 'document' : 'documents'} into Galaxy`);
@@ -943,7 +961,9 @@
   }
 
   function connectSse() {
-    const es = new EventSource('/api/events');
+    let sseUrl = '/api/events';
+    if (apiToken) sseUrl += `?token=${encodeURIComponent(apiToken)}`;
+    const es = new EventSource(sseUrl);
     es.onmessage = (evt) => {
       try {
         const payload = JSON.parse(evt.data);
@@ -1163,7 +1183,7 @@
       const hash = el.btnDeleteDoc.dataset.hash;
       if (!hash) return;
       try {
-        const res = await fetch(`/api/documents/${encodeURIComponent(hash)}`, { method: 'DELETE' });
+        const res = await apiFetch(`/api/documents/${encodeURIComponent(hash)}`, { method: 'DELETE' });
         if (!res.ok) throw new Error('Failed to remove document');
         closeModals();
         state.selectedHash = null;

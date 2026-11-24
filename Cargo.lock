@@ -467,6 +467,7 @@ dependencies = [
  "egui",
  "futures-util",
  "glob",
+ "libc",
  "notify",
  "open",
  "pdf-extract",

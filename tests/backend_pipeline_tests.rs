@@ -8,11 +8,22 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
+fn get_page_size() -> usize {
+    #[cfg(unix)]
+    {
+        let sz = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if sz > 0 {
+            return sz as usize;
+        }
+    }
+    4096
+}
+
 fn get_rss_bytes() -> usize {
     if let Ok(statm) = fs::read_to_string("/proc/self/statm") {
         if let Some(rss_pages_str) = statm.split_whitespace().nth(1) {
             if let Ok(pages) = rss_pages_str.parse::<usize>() {
-                return pages * 4096;
+                return pages * get_page_size();
             }
         }
     }

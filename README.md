@@ -35,13 +35,20 @@ The compiled binary will be located at `./target/release/axel`.
 ./target/release/axel check
 ```
 
-### 3. Launch the Embedded Web UI & API
+### 3. Launch Web Server or Native Desktop App
+
+Start the secure local Web UI & REST API:
 ```bash
-./target/release/axel ui
-# Or specify a custom port:
-./target/release/axel ui --port 8080
+./target/release/axel serve
+# Or specify a custom port, host binding, or token:
+./target/release/axel serve --port 8080 --host 127.0.0.1
 ```
 Open [http://localhost:8765](http://localhost:8765) in your browser to inspect document stats, search indexed files, and trigger folder scans.
+
+To launch the native GPU-accelerated desktop workstation:
+```bash
+./target/release/axel ui
+```
 
 ### 4. CLI Commands
 
@@ -72,14 +79,15 @@ Open [http://localhost:8765](http://localhost:8765) in your browser to inspect d
 AXEL looks for an optional `.env` file in the current directory. Copy `.env.example` to customize settings:
 
 ```env
-GROQ_API_KEY=gsk_your_groq_api_key_here
-MODEL_NAME=llama-3.3-70b-versatile
-AXEL_GROQ_FALLBACK_MODELS=llama-3.1-8b-instant,mixtral-8x7b-32768
+GROQ_API_KEY=
+AXEL_MODEL_NAME=qwen/qwen3.8-27b
+AXEL_GROQ_FALLBACK_MODELS=openai/gpt-oss-120b,openai/gpt-oss-20b,llama-3.3-70b-versatile
 AXEL_INPUT_FOLDER=./documents
-AXEL_INDEX_PATH=axel_index.json
+AXEL_INDEX_FILE=axel_index.json
 AXEL_MAX_KEYWORDS=10
 AXEL_TOP_K_RESULTS=5
-AXEL_SERVER_PORT=8765
+AXEL_HOST=127.0.0.1
+AXEL_PORT=8765
 ```
 
 *Note: If `GROQ_API_KEY` is omitted, AXEL runs 100% offline using its built-in rule classifier and keyword scoring engine.*

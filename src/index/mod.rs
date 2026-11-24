@@ -81,14 +81,52 @@ pub struct DocumentIndex {
     dirty: bool,
 }
 
+impl Default for DocumentIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DocumentIndex {
     pub fn load<P: AsRef<Path>>(index_path: P) -> Self {
         let file_path = index_path.as_ref().to_path_buf();
         let raw_items: Vec<IndexItem> = if file_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                serde_json::from_str(&content).unwrap_or_default()
-            } else {
-                Vec::new()
+            match std::fs::read_to_string(&file_path) {
+                Ok(content) => match serde_json::from_str::<Vec<IndexItem>>(&content) {
+                    Ok(items) => items,
+                    Err(err) => {
+                        eprintln!(
+                            "[Index] Warning: Failed to parse index JSON at {}: {err}. Attempting recovery from backup...",
+                            file_path.display()
+                        );
+                        let bak_path = format!("{}.bak", file_path.display());
+                        if let Ok(bak_content) = std::fs::read_to_string(&bak_path) {
+                            match serde_json::from_str::<Vec<IndexItem>>(&bak_content) {
+                                Ok(items) => {
+                                    eprintln!(
+                                        "[Index] Successfully recovered {} items from backup: {}",
+                                        items.len(),
+                                        bak_path
+                                    );
+                                    items
+                                }
+                                Err(bak_err) => {
+                                    eprintln!("[Index] Backup file also invalid: {bak_err}");
+                                    Vec::new()
+                                }
+                            }
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                },
+                Err(err) => {
+                    eprintln!(
+                        "[Index] Warning: Failed to read index file at {}: {err}",
+                        file_path.display()
+                    );
+                    Vec::new()
+                }
             }
         } else {
             Vec::new()
@@ -120,62 +158,20 @@ impl DocumentIndex {
         }
     }
 
+    pub fn new() -> Self {
+        Self::from_items(Vec::new())
+    }
+
     pub fn compute_file_hash<P: AsRef<Path>>(path: P) -> Option<String> {
-        use std::io::Seek;
         let mut file = File::open(&path).ok()?;
-        let meta = file.metadata().ok()?;
-        let file_len = meta.len();
-
         let mut hasher = Sha256::new();
-
-        // For files <= 16MB (documents, images, code, pdfs): compute full SHA-256 with 64KB buffer
-        if file_len <= 16 * 1024 * 1024 {
-            let mut buffer = [0u8; 65536];
-            loop {
-                let bytes_read = file.read(&mut buffer).ok()?;
-                if bytes_read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..bytes_read]);
+        let mut buffer = [0u8; 65536];
+        loop {
+            let bytes_read = file.read(&mut buffer).ok()?;
+            if bytes_read == 0 {
+                break;
             }
-        } else {
-            // For files > 16MB (e.g. multi-gigabyte media, videos, archives):
-            // Compute compound sparse signature: size + mtime + head (64KB) + mid (64KB) + tail (64KB)
-            hasher.update(file_len.to_le_bytes());
-            if let Ok(mtime) = meta.modified() {
-                if let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                    hasher.update(duration.as_secs().to_le_bytes());
-                    hasher.update(duration.subsec_nanos().to_le_bytes());
-                }
-            }
-
-            let chunk_size = 65536;
-            let mut buffer = vec![0u8; chunk_size];
-
-            // 1. Head chunk (0..64KB)
-            if let Ok(n) = file.read(&mut buffer) {
-                hasher.update(&buffer[..n]);
-            }
-
-            // 2. Middle chunk
-            if file_len > (chunk_size as u64 * 3) {
-                let mid_pos = file_len / 2;
-                if file.seek(std::io::SeekFrom::Start(mid_pos)).is_ok() {
-                    if let Ok(n) = file.read(&mut buffer) {
-                        hasher.update(&buffer[..n]);
-                    }
-                }
-            }
-
-            // 3. Tail chunk
-            if file_len > (chunk_size as u64 * 2) {
-                let tail_pos = file_len.saturating_sub(chunk_size as u64);
-                if file.seek(std::io::SeekFrom::Start(tail_pos)).is_ok() {
-                    if let Ok(n) = file.read(&mut buffer) {
-                        hasher.update(&buffer[..n]);
-                    }
-                }
-            }
+            hasher.update(&buffer[..bytes_read]);
         }
 
         Some(format!("{:x}", hasher.finalize()))
@@ -239,7 +235,31 @@ impl DocumentIndex {
         } else if let Some(pos) = self.items.iter().position(|i| {
             i.path == item.path || resolve_workspace_path(Path::new(&i.path)) == item_resolved
         }) {
-            self.items[pos] = item;
+            // M01: If existing item has multiple physical aliases and only one copy was modified,
+            // preserve the index entry for the unmodified copies!
+            let existing = &mut self.items[pos];
+            if existing.physical_paths.len() > 1 {
+                let path_to_remove = item.path.clone();
+                existing.physical_paths.retain(|p| {
+                    p != &path_to_remove && resolve_workspace_path(Path::new(p)) != item_resolved
+                });
+                existing.is_duplicate = existing.physical_paths.len() > 1;
+                if existing.path == path_to_remove
+                    || resolve_workspace_path(Path::new(&existing.path)) == item_resolved
+                {
+                    if let Some(next_p) = existing.physical_paths.first().cloned() {
+                        if let Some(fname) =
+                            Path::new(&next_p).file_name().and_then(|s| s.to_str())
+                        {
+                            existing.file = fname.to_string();
+                        }
+                        existing.path = next_p;
+                    }
+                }
+                self.items.push(item);
+            } else {
+                self.items[pos] = item;
+            }
         } else {
             self.items.push(item);
         }
@@ -257,12 +277,32 @@ impl DocumentIndex {
     }
 
     pub fn remove_physical_copy(&mut self, hash: &str, path_to_remove: &str) -> bool {
+        let path_resolved = resolve_workspace_path(Path::new(path_to_remove));
         if let Some(pos) = self.items.iter().position(|i| i.hash == hash) {
-            let item = &mut self.items[pos];
-            let before = item.physical_paths.len();
-            item.physical_paths.retain(|p| p != path_to_remove);
-            if item.physical_paths.len() < before {
-                item.is_duplicate = item.physical_paths.len() > 1;
+            let before = self.items[pos].physical_paths.len();
+            self.items[pos].physical_paths.retain(|p| {
+                p != path_to_remove && resolve_workspace_path(Path::new(p)) != path_resolved
+            });
+            if self.items[pos].physical_paths.len() < before {
+                if self.items[pos].physical_paths.is_empty() {
+                    self.items.remove(pos);
+                } else {
+                    self.items[pos].is_duplicate = self.items[pos].physical_paths.len() > 1;
+                    let current_primary_resolved =
+                        resolve_workspace_path(Path::new(&self.items[pos].path));
+                    if self.items[pos].path == path_to_remove
+                        || current_primary_resolved == path_resolved
+                    {
+                        if let Some(next_p) = self.items[pos].physical_paths.first().cloned() {
+                            if let Some(fname) =
+                                Path::new(&next_p).file_name().and_then(|s| s.to_str())
+                            {
+                                self.items[pos].file = fname.to_string();
+                            }
+                            self.items[pos].path = next_p;
+                        }
+                    }
+                }
                 self.dirty = true;
                 return true;
             }
@@ -295,6 +335,13 @@ impl DocumentIndex {
             return Ok(());
         }
 
+        if self.file_path.as_os_str().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Cannot save index: file_path is empty",
+            ));
+        }
+
         if let Some(parent) = self.file_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
@@ -304,9 +351,42 @@ impl DocumentIndex {
         let json = serde_json::to_string_pretty(&self.items)
             .map_err(std::io::Error::other)?;
 
-        let temp_path = format!("{}.tmp", self.file_path.display());
-        std::fs::write(&temp_path, json)?;
-        std::fs::rename(temp_path, &self.file_path)?;
+        // H08: Atomic persistence with fsync and crash-recovery backup
+        static SAVE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let count = SAVE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+
+        let parent_dir = self.file_path.parent().unwrap_or_else(|| Path::new("."));
+        let temp_name = format!(
+            ".tmp_index_{}_{}_{}.tmp",
+            std::process::id(),
+            now,
+            count
+        );
+        let temp_path = parent_dir.join(temp_name);
+
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+        }
+
+        if self.file_path.exists() {
+            let bak_path = format!("{}.bak", self.file_path.display());
+            let _ = std::fs::copy(&self.file_path, &bak_path);
+        }
+
+        if let Err(e) = std::fs::rename(&temp_path, &self.file_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
 
         self.dirty = false;
         Ok(())

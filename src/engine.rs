@@ -4,7 +4,7 @@ use crate::classifier::{
 };
 use crate::config::{resolve_workspace_path, Config};
 use crate::extractor::{
-    detect_file_type, extract_raw_text, extract_text, ocr, preprocess_text,
+    detect_file_type, extract_raw_text, extract_text, ocr,
 };
 use crate::index::{DocumentIndex, FileMetadataTag, IndexItem};
 use serde::{Deserialize, Serialize};
@@ -105,14 +105,18 @@ pub struct ScanSummary {
     pub scanned: usize,
     pub indexed: usize,
     pub skipped: usize,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteOutcome {
     pub deleted: bool,
+    pub index_deleted: bool,
+    pub file_removed_from_disk: bool,
+    pub disk_removal_method: Option<String>,
     pub hash: String,
     pub file: String,
-    pub file_removed_from_disk: bool,
+    pub error: Option<String>,
 }
 
 pub fn category_accent(category: &str) -> &'static str {
@@ -585,9 +589,20 @@ pub fn build_system_stats(config: &Config, index: &DocumentIndex) -> SystemStats
     }
 }
 
-pub fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
-    collect_files_bounded(dir, files, 0, 8, 2000);
+pub fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> bool {
+    let max_files = std::env::var("AXEL_MAX_SCAN_FILES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10_000);
+    let max_depth = std::env::var("AXEL_MAX_SCAN_DEPTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32);
+
+    let mut truncated = false;
+    collect_files_bounded(dir, files, 0, max_depth, max_files, &mut truncated);
     files.sort();
+    truncated
 }
 
 fn collect_files_bounded(
@@ -596,8 +611,17 @@ fn collect_files_bounded(
     depth: usize,
     max_depth: usize,
     max_files: usize,
+    truncated: &mut bool,
 ) {
-    if depth > max_depth || files.len() >= max_files || !dir.is_dir() {
+    if files.len() >= max_files {
+        *truncated = true;
+        return;
+    }
+    if depth > max_depth {
+        *truncated = true;
+        return;
+    }
+    if !dir.is_dir() {
         return;
     }
 
@@ -607,6 +631,7 @@ fn collect_files_bounded(
 
     for entry in entries.flatten() {
         if files.len() >= max_files {
+            *truncated = true;
             break;
         }
         let Ok(ft) = entry.file_type() else {
@@ -621,7 +646,7 @@ fn collect_files_bounded(
 
         if ft.is_dir() {
             if !should_skip_directory(&name_str) {
-                collect_files_bounded(&path, files, depth + 1, max_depth, max_files);
+                collect_files_bounded(&path, files, depth + 1, max_depth, max_files, truncated);
             }
         } else if ft.is_file() {
             let size = entry.metadata().map(|m| m.len()).ok();
@@ -669,10 +694,12 @@ pub async fn analyze_and_build_item_with_tfidf(
         .to_string();
 
     let item = if is_script_extension(&ext) {
+        // Redact secrets and credentials before TF-IDF registration (H10, M12)
+        let (sanitized_code, _) = crate::classifier::privacy::redact_code_secrets_and_pii(&raw_text);
         let mut tfidf_kws = Vec::new();
         if let Some(engine) = tfidf.as_deref_mut() {
-            engine.register_document_terms(&raw_text, &[]);
-            tfidf_kws = engine.extract_keywords(&raw_text, &[], 6);
+            engine.register_document_terms(&sanitized_code, &[]);
+            tfidf_kws = engine.extract_keywords(&sanitized_code, &[], 6);
         }
 
         let (ai_res, symbols) = ai.analyze_code_script(&raw_text, &file_name, &ext, &tfidf_kws).await;
@@ -687,14 +714,16 @@ pub async fn analyze_and_build_item_with_tfidf(
             ai_res.virtual_paths,
         )
     } else {
+        // Redact sensitive personal data before TF-IDF registration (H11, M12)
+        let (sanitized_full_text, _) = crate::classifier::privacy::redact_sensitive_pii(&raw_text);
         let mut tfidf_kws = Vec::new();
         if let Some(engine) = tfidf.as_deref_mut() {
-            engine.register_document_terms(&raw_text, &[]);
-            tfidf_kws = engine.extract_keywords(&raw_text, &[], 6);
+            engine.register_document_terms(&sanitized_full_text, &[]);
+            tfidf_kws = engine.extract_keywords(&sanitized_full_text, &[], 6);
         }
 
-        let preprocessed = preprocess_text(&raw_text);
-        let ai_res = ai.analyze_document(&preprocessed, &file_name, Some(&tfidf_kws)).await;
+        // Pass full text into analyze_document so identity & privacy checks inspect complete text (H11)
+        let ai_res = ai.analyze_document(&raw_text, &file_name, Some(&tfidf_kws)).await;
 
         IndexItem::new(
             file_name,
@@ -740,10 +769,10 @@ where
 {
     let folder_owned = resolve_workspace_path(folder);
     let folder_for_task = folder_owned.clone();
-    let candidate_files = tokio::task::spawn_blocking(move || {
+    let (candidate_files, was_truncated) = tokio::task::spawn_blocking(move || {
         let mut files = Vec::new();
-        collect_files_recursive(&folder_for_task, &mut files);
-        files
+        let truncated = collect_files_recursive(&folder_for_task, &mut files);
+        (files, truncated)
     })
     .await
     .unwrap_or_default();
@@ -812,9 +841,99 @@ where
             scanned,
             indexed,
             skipped,
+            truncated: was_truncated,
         },
         items_to_insert,
     )
+}
+
+static INGEST_STAGE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Compares two files on disk byte-for-byte to verify exact bit-level identity.
+/// Returns Ok(true) only if both files exist, are regular files, have identical sizes,
+/// represent different filesystem paths/inodes, and match completely from byte 0 to EOF.
+pub fn are_files_identical<P1: AsRef<Path>, P2: AsRef<Path>>(
+    p1: P1,
+    p2: P2,
+) -> Result<bool, std::io::Error> {
+    use std::io::Read;
+
+    let p1 = p1.as_ref();
+    let p2 = p2.as_ref();
+
+    let meta1 = std::fs::symlink_metadata(p1)?;
+    let meta2 = std::fs::symlink_metadata(p2)?;
+
+    if !meta1.is_file() || !meta2.is_file() {
+        return Ok(false);
+    }
+
+    if meta1.len() != meta2.len() {
+        return Ok(false);
+    }
+
+    // Ensure we are not comparing the exact same file/inode on disk
+    if let (Ok(c1), Ok(c2)) = (std::fs::canonicalize(p1), std::fs::canonicalize(p2)) {
+        if c1 == c2 {
+            return Ok(false);
+        }
+    }
+
+    if meta1.len() == 0 {
+        return Ok(true);
+    }
+
+    let mut f1 = std::fs::File::open(p1)?;
+    let mut f2 = std::fs::File::open(p2)?;
+
+    let mut buf1 = [0u8; 65536];
+    let mut buf2 = [0u8; 65536];
+
+    loop {
+        let n1 = f1.read(&mut buf1)?;
+        let n2 = f2.read(&mut buf2)?;
+
+        if n1 != n2 {
+            return Ok(false);
+        }
+        if n1 == 0 {
+            break;
+        }
+        if buf1[..n1] != buf2[..n2] {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+/// Finds a non-colliding destination filename in `target_dir` for `original_name`.
+/// If `original_name` does not exist in `target_dir`, returns `(target_dir.join(original_name), original_name)`.
+/// If it exists (or is a symlink), generates `<stem>_1.<ext>`, `<stem>_2.<ext>`, etc.,
+/// until an unused filename is found.
+pub fn resolve_collision_safe_path(target_dir: &Path, original_name: &str) -> (PathBuf, String) {
+    let p = Path::new(original_name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+
+    let initial_dest = target_dir.join(original_name);
+    if std::fs::symlink_metadata(&initial_dest).is_err() {
+        return (initial_dest, original_name.to_string());
+    }
+
+    let mut counter = 1;
+    loop {
+        let candidate_name = if ext.is_empty() {
+            format!("{stem}_{counter}")
+        } else {
+            format!("{stem}_{counter}.{ext}")
+        };
+        let candidate_path = target_dir.join(&candidate_name);
+        if std::fs::symlink_metadata(&candidate_path).is_err() {
+            return (candidate_path, candidate_name);
+        }
+        counter += 1;
+    }
 }
 
 pub async fn ingest_local_files(
@@ -843,20 +962,45 @@ pub async fn ingest_local_files(
                 .filter(|s| !s.is_empty() && *s != "." && *s != "..")
                 .ok_or_else(|| "Invalid filename".to_string())?;
 
-            let dest = workspace_resolved.join(file_name);
+            let default_dest = workspace_resolved.join(file_name);
             let same_file = match (
                 std::fs::canonicalize(src_path),
-                std::fs::canonicalize(&dest),
+                std::fs::canonicalize(&default_dest),
             ) {
                 (Ok(a), Ok(b)) => a == b,
                 _ => false,
             };
 
-            if !same_file {
-                std::fs::copy(src_path, &dest)
-                    .map_err(|e| format!("Failed to copy {}: {e}", src_path.display()))?;
+            if same_file {
+                // File is already in the workspace at the destination
+                default_dest
+            } else if default_dest.exists() && are_files_identical(src_path, &default_dest).unwrap_or(false) {
+                // Destination exists and has identical content; reuse safely without duplicating/overwriting
+                default_dest
+            } else {
+                // Destination does not exist, or exists with different content.
+                // Reserve a collision-safe destination name (e.g. name_1.ext) to prevent overwrite data loss (H02).
+                let (safe_dest, _) = resolve_collision_safe_path(&workspace_resolved, file_name);
+
+                // Stage copy securely via unique temporary file, then atomic rename
+                let count = INGEST_STAGE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let staging_name = format!(".tmp_ingest_{}_{}_{}.tmp", std::process::id(), now, count);
+                let staging_path = workspace_resolved.join(&staging_name);
+
+                std::fs::copy(src_path, &staging_path)
+                    .map_err(|e| format!("Failed to stage copy {}: {e}", src_path.display()))?;
+
+                if let Err(e) = std::fs::rename(&staging_path, &safe_dest) {
+                    let _ = std::fs::remove_file(&staging_path);
+                    return Err(format!("Failed to finalize copy to {}: {e}", safe_dest.display()));
+                }
+
+                safe_dest
             }
-            dest
         } else {
             src_path.clone()
         };
@@ -889,9 +1033,62 @@ pub fn trash_file_safely(path: &Path) -> Result<(), String> {
 pub fn delete_document_from_index(
     hash: &str,
     delete_file: bool,
+    permanent: bool,
     config: &Config,
     index: &mut DocumentIndex,
 ) -> Result<DeleteOutcome, String> {
+    let item = index
+        .find_by_hash(hash)
+        .cloned()
+        .ok_or_else(|| "Document not found".to_string())?;
+
+    let mut file_removed_from_disk = false;
+    let mut disk_removal_method = None;
+    let mut disk_error = None;
+
+    if delete_file {
+        let target_path = Path::new(&item.path);
+        if !is_path_inside_workspace(target_path, &config.input_folder) {
+            disk_error = Some("Target file is outside workspace boundaries; disk deletion aborted.".to_string());
+        } else if !target_path.exists() {
+            disk_error = Some("Target file does not exist on disk.".to_string());
+        } else {
+            // Verify current disk contents still match indexed hash before deletion (H05)
+            match DocumentIndex::compute_file_hash(target_path) {
+                Some(ref current_hash) if current_hash == hash => {
+                    if permanent {
+                        match std::fs::remove_file(target_path) {
+                            Ok(_) => {
+                                file_removed_from_disk = true;
+                                disk_removal_method = Some("permanent".to_string());
+                            }
+                            Err(e) => {
+                                disk_error = Some(format!("Failed to permanently remove file: {e}"));
+                            }
+                        }
+                    } else {
+                        // Safe default: move to OS trash ONLY. Never silently fall back to permanent deletion (H05).
+                        match trash::delete(target_path) {
+                            Ok(_) => {
+                                file_removed_from_disk = true;
+                                disk_removal_method = Some("trash".to_string());
+                            }
+                            Err(e) => {
+                                disk_error = Some(format!("Failed to move file to OS trash: {e}. Permanent removal was not requested."));
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    disk_error = Some("Security abort: File contents on disk have been modified since indexing. Refusing to delete to prevent data loss.".to_string());
+                }
+                None => {
+                    disk_error = Some("Security abort: Could not read target file to verify hash.".to_string());
+                }
+            }
+        }
+    }
+
     let removed = index
         .remove_by_hash(hash)
         .ok_or_else(|| "Document not found".to_string())?;
@@ -900,21 +1097,14 @@ pub fn delete_document_from_index(
         .save()
         .map_err(|e| format!("Failed to save index: {e}"))?;
 
-    let mut file_removed_from_disk = false;
-    if delete_file {
-        let target_path = Path::new(&removed.path);
-        if is_path_inside_workspace(target_path, &config.input_folder) {
-            if trash::delete(target_path).is_ok() || std::fs::remove_file(target_path).is_ok() {
-                file_removed_from_disk = true;
-            }
-        }
-    }
-
     Ok(DeleteOutcome {
         deleted: true,
+        index_deleted: true,
+        file_removed_from_disk,
+        disk_removal_method,
         hash: removed.hash,
         file: removed.file,
-        file_removed_from_disk,
+        error: disk_error,
     })
 }
 

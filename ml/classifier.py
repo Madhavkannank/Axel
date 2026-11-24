@@ -6,8 +6,9 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
-MODEL_PATH = "ml/model.pkl"
-DATA_PATH = "ml/data.json"
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_PATH = os.path.join(APP_DIR, "ml", "model.pkl")
+DATA_PATH = os.path.join(APP_DIR, "ml", "data.json")
 
 _classifier_pipeline = None
 
@@ -154,12 +155,17 @@ def predict_category(text):
     global _classifier_pipeline
     if _classifier_pipeline is None:
         try:
-            if os.path.exists(MODEL_PATH):
+            canonical_model = os.path.realpath(MODEL_PATH)
+            canonical_app = os.path.realpath(APP_DIR)
+            if os.path.exists(MODEL_PATH) and canonical_model.startswith(canonical_app):
                 _classifier_pipeline = joblib.load(MODEL_PATH)
             else:
                 train_model()
-        except:
-            pass
+        except Exception:
+            try:
+                train_model()
+            except Exception:
+                pass
 
     if _classifier_pipeline is None or not str(text).strip():
         return "Unknown", 0.0

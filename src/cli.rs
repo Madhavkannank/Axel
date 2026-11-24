@@ -42,9 +42,9 @@ pub enum Commands {
         /// Search query
         query: String,
 
-        /// Maximum number of search results to display
-        #[arg(short, long, default_value_t = 10)]
-        limit: usize,
+        /// Maximum number of search results to display (defaults to AXEL_TOP_K_RESULTS)
+        #[arg(short, long)]
+        limit: Option<usize>,
     },
 
     /// Process a single document and print its extracted metadata and category
@@ -69,6 +69,14 @@ pub enum Commands {
         /// Port number to listen on
         #[arg(short, long)]
         port: Option<u16>,
+
+        /// Host address to bind (defaults to 127.0.0.1 for local security)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// API authentication token (if omitted, a secure session token is generated)
+        #[arg(long)]
+        token: Option<String>,
 
         /// Do not automatically open default web browser
         #[arg(long)]

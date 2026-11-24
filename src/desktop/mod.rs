@@ -101,6 +101,7 @@ pub struct AxelDesktopApp {
     workspace_path_error: Option<String>,
     workspace_quick_folders: Vec<(String, PathBuf)>,
     recent_workspaces: Vec<PathBuf>,
+    top_k_results: usize,
     is_picking_folder: bool,
     topbar_anchor_rect: Rect,
 
@@ -148,7 +149,10 @@ impl AxelDesktopApp {
                 quick_folders.push(("Home Documents".to_string(), doc));
             }
         }
-        let recent_workspaces = vec![config.input_folder.clone()];
+        let mut recent_workspaces = crate::config::load_recent_workspaces();
+        if !recent_workspaces.iter().any(|p| crate::config::same_dir(p, &config.input_folder)) {
+            recent_workspaces.insert(0, config.input_folder.clone());
+        }
 
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
         let (evt_tx, evt_rx) = mpsc::channel();
@@ -188,6 +192,7 @@ impl AxelDesktopApp {
             workspace_path_error: None,
             workspace_quick_folders: quick_folders,
             recent_workspaces,
+            top_k_results: config.top_k_results,
             is_picking_folder: false,
             topbar_anchor_rect: Rect::NOTHING,
             screenshot_path,
@@ -263,7 +268,8 @@ impl AxelDesktopApp {
             self.search_results.clear();
             self.search_highlight_hashes.clear();
         } else {
-            self.search_results = self.search_index.search(&self.search_query, 12);
+            let limit = self.top_k_results.max(12);
+            self.search_results = self.search_index.search(&self.search_query, limit);
             self.search_highlight_hashes = self
                 .search_results
                 .iter()
@@ -1096,7 +1102,7 @@ fn spawn_background_worker(
                                 }
                             }
                             WorkerCommand::DeleteDocument { hash, delete_file } => {
-                                match delete_document_from_index(&hash, delete_file, &config, &mut index) {
+                                match delete_document_from_index(&hash, delete_file, false, &config, &mut index) {
                                     Ok(outcome) => {
                                         emit_snapshot(
                                             &config,
@@ -1119,60 +1125,101 @@ fn spawn_background_worker(
 
                                 if let Some(item) = index.find_by_hash(&canonical_hash).cloned() {
                                     let canonical_path = Path::new(&item.path);
+                                    let tpath = Path::new(&trash_path);
+
                                     if !canonical_path.exists() {
                                         error_msg = Some(
                                             "Security abort: Canonical primary file is missing on disk. Refusing to delete duplicate."
                                                 .to_string(),
                                         );
-                                    } else {
-                                        let tpath = Path::new(&trash_path);
-                                        if !tpath.exists() {
-                                            error_msg = Some(format!(
-                                                "Duplicate file does not exist: {}",
-                                                trash_path
-                                            ));
+                                    } else if !tpath.exists() {
+                                        error_msg = Some(format!(
+                                            "Duplicate file does not exist: {}",
+                                            trash_path
+                                        ));
+                                    } else if !crate::engine::is_path_inside_workspace(canonical_path, &config.input_folder)
+                                        || !crate::engine::is_path_inside_workspace(tpath, &config.input_folder)
+                                    {
+                                        error_msg = Some(
+                                            "Security abort: Both canonical and duplicate files must be within workspace boundaries."
+                                                .to_string(),
+                                        );
+                                    } else if tpath == canonical_path {
+                                        error_msg = Some(
+                                            "Security abort: Attempted to delete the canonical primary file. Refusing to delete."
+                                                .to_string(),
+                                        );
+                                    } else if let (Ok(c1), Ok(c2)) = (std::fs::canonicalize(canonical_path), std::fs::canonicalize(tpath)) {
+                                        if c1 == c2 {
+                                            error_msg = Some(
+                                                "Security abort: Duplicate path resolves to the same filesystem inode as canonical file."
+                                                    .to_string(),
+                                            );
+                                        } else if !item.physical_paths.iter().any(|p| p == &trash_path || Path::new(p) == tpath) {
+                                            error_msg = Some(
+                                                "Security abort: Target file is not a registered physical copy of this document."
+                                                    .to_string(),
+                                            );
                                         } else {
-                                            // Re-verify by full content SHA-256 hash before trashing
-                                            match DocumentIndex::compute_file_hash(tpath) {
-                                                Some(ref h) if h == &canonical_hash => {
-                                                    match trash::delete(tpath) {
-                                                        Ok(_) => {
-                                                            let fname = tpath
-                                                                .file_name()
-                                                                .and_then(|n| n.to_str())
-                                                                .unwrap_or("duplicate");
-                                                            success_msg = Some(format!(
-                                                                "Verified and moved duplicate {} to OS trash",
-                                                                fname
-                                                            ));
-                                                            index.remove_physical_copy(
-                                                                &canonical_hash,
-                                                                &trash_path,
+                                            // Verify that canonical file currently on disk still matches canonical hash (H04)
+                                            match DocumentIndex::compute_file_hash(canonical_path) {
+                                                Some(ref chash) if chash == &canonical_hash => {
+                                                    // Verify bit-for-bit identity between candidate and canonical copy (H03, H04)
+                                                    match crate::engine::are_files_identical(canonical_path, tpath) {
+                                                        Ok(true) => {
+                                                            match trash::delete(tpath) {
+                                                                Ok(_) => {
+                                                                    let fname = tpath
+                                                                        .file_name()
+                                                                        .and_then(|n| n.to_str())
+                                                                        .unwrap_or("duplicate");
+                                                                    success_msg = Some(format!(
+                                                                        "Verified and moved duplicate {} to OS trash",
+                                                                        fname
+                                                                    ));
+                                                                    index.remove_physical_copy(
+                                                                        &canonical_hash,
+                                                                        &trash_path,
+                                                                    );
+                                                                    let _ = index.save();
+                                                                }
+                                                                Err(e) => {
+                                                                    error_msg = Some(format!(
+                                                                        "Failed to move duplicate to trash: {}",
+                                                                        e
+                                                                    ));
+                                                                }
+                                                            }
+                                                        }
+                                                        Ok(false) => {
+                                                            error_msg = Some(
+                                                                "Security check failed: Duplicate file content does not match canonical file! Aborting trash to prevent data loss."
+                                                                    .to_string(),
                                                             );
-                                                            let _ = index.save();
                                                         }
                                                         Err(e) => {
                                                             error_msg = Some(format!(
-                                                                "Failed to move duplicate to trash: {}",
-                                                                e
+                                                                "Failed to verify duplicate content against canonical file: {e}"
                                                             ));
                                                         }
                                                     }
                                                 }
                                                 Some(_) => {
                                                     error_msg = Some(
-                                                        "Security check failed: File hash on disk does not match canonical hash! Aborting trash."
+                                                        "Security abort: Canonical primary file has changed on disk since indexing. Aborting trash to prevent data loss."
                                                             .to_string(),
                                                     );
                                                 }
                                                 None => {
                                                     error_msg = Some(
-                                                        "Failed to read duplicate file for SHA-256 verification."
+                                                        "Failed to read canonical file for verification."
                                                             .to_string(),
                                                     );
                                                 }
                                             }
                                         }
+                                    } else {
+                                        error_msg = Some("Failed to resolve filesystem paths for security verification.".to_string());
                                     }
                                 } else {
                                     error_msg = Some("Canonical item not found in index.".to_string());
@@ -1222,13 +1269,44 @@ fn spawn_background_worker(
                                         ));
                                         continue;
                                     }
-                                    for redundant in physical_paths.iter().skip(1) {
+                                    if !crate::engine::is_path_inside_workspace(canonical_path, &config.input_folder) {
+                                        continue;
+                                    }
+                                    // Verify canonical file has not changed on disk (H04)
+                                    if DocumentIndex::compute_file_hash(canonical_path).as_deref() != Some(&hash) {
+                                        errors.push(format!(
+                                            "Canonical content changed on disk for {}; skipping duplicate cleanup",
+                                            canonical_path_str
+                                        ));
+                                        continue;
+                                    }
+
+                                    let canonical_canon = match std::fs::canonicalize(canonical_path) {
+                                        Ok(c) => c,
+                                        Err(_) => continue,
+                                    };
+
+                                    // Iterate over all physical paths, explicitly preserving the canonical file regardless of alias order (H04)
+                                    for redundant in &physical_paths {
                                         let rpath = Path::new(redundant);
+                                        if rpath == canonical_path {
+                                            continue;
+                                        }
+                                        if let Ok(rcanon) = std::fs::canonicalize(rpath) {
+                                            if rcanon == canonical_canon {
+                                                continue;
+                                            }
+                                        }
                                         if !rpath.exists() {
                                             continue;
                                         }
-                                        if let Some(rhash) = DocumentIndex::compute_file_hash(rpath) {
-                                            if rhash == hash {
+                                        if !crate::engine::is_path_inside_workspace(rpath, &config.input_folder) {
+                                            continue;
+                                        }
+
+                                        // Verify byte-for-byte identity with canonical file before trashing (H03, H04)
+                                        match crate::engine::are_files_identical(canonical_path, rpath) {
+                                            Ok(true) => {
                                                 let size = std::fs::metadata(rpath)
                                                     .map(|m| m.len())
                                                     .unwrap_or(0);
@@ -1238,6 +1316,7 @@ fn spawn_background_worker(
                                                     index.remove_physical_copy(&hash, redundant);
                                                 }
                                             }
+                                            _ => continue,
                                         }
                                     }
                                 }
@@ -1268,7 +1347,7 @@ fn spawn_background_worker(
                                 match crate::engine::trash_file_safely(p) {
                                     Ok(_) => {
                                         if let Some(item) = index.find_by_path(&path_str).cloned() {
-                                            let _ = delete_document_from_index(&item.hash, false, &config, &mut index);
+                                            let _ = delete_document_from_index(&item.hash, false, false, &config, &mut index);
                                         }
                                         let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("file");
                                         emit_snapshot(

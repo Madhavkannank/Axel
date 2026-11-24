@@ -45,7 +45,6 @@ const SKIP_DIR_EXACT: &[&str] = &[
     // Game distribution & runners
     ".steam",
     "steamapps",
-    "common",
     "compatdata",
     "lutris",
     "heroic",
@@ -120,6 +119,32 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
 /// Supported image extensions (document scans, receipts, etc.)
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
 
+fn extract_dir_tokens(name: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = name.chars().collect();
+
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if !c.is_alphanumeric() {
+            if !current.is_empty() {
+                tokens.push(current.to_lowercase());
+                current.clear();
+            }
+        } else if c.is_uppercase() && !current.is_empty() && chars[i - 1].is_lowercase() {
+            tokens.push(current.to_lowercase());
+            current.clear();
+            current.push(c);
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current.to_lowercase());
+    }
+    tokens
+}
+
 /// Determine if a directory should be skipped completely during traversal.
 pub fn should_skip_directory(name: &str) -> bool {
     // Hidden directories (starts with '.')
@@ -129,14 +154,53 @@ pub fn should_skip_directory(name: &str) -> bool {
 
     let lower = name.to_lowercase();
 
+    // Check user-configured explicit includes (AXEL_INCLUDE_DIRS overrides default exclusions)
+    if let Ok(includes) = std::env::var("AXEL_INCLUDE_DIRS") {
+        for incl in includes.split(',') {
+            let clean = incl.trim().to_lowercase();
+            if !clean.is_empty() && (lower == clean || lower.contains(&clean)) {
+                return false;
+            }
+        }
+    }
+
+    // Check user-configured custom excludes (AXEL_EXCLUDE_DIRS)
+    if let Ok(excludes) = std::env::var("AXEL_EXCLUDE_DIRS") {
+        for excl in excludes.split(',') {
+            let clean = excl.trim().to_lowercase();
+            if !clean.is_empty() && (lower == clean || lower.contains(&clean)) {
+                return true;
+            }
+        }
+    }
+
     // Check exact name matches
     if SKIP_DIR_EXACT.iter().any(|&s| s.eq_ignore_ascii_case(&lower)) {
         return true;
     }
 
-    // Check substring matches (repacks, modpacks, game saves, cracks)
-    if SKIP_DIR_CONTAINS.iter().any(|&sub| lower.contains(sub)) {
-        return true;
+    // Delimited and camelCase token analysis to prevent false substring matches (e.g. "Pruned Records" must NOT match "rune")
+    let tokens = extract_dir_tokens(name);
+
+    for &sub in SKIP_DIR_CONTAINS {
+        // Exact token match or whole lower match
+        if tokens.iter().any(|t| t == sub) || lower == sub {
+            return true;
+        }
+
+        // Token prefix matches (e.g. token "repacks" starts with "repack", "steam" starts with "steam")
+        if (sub == "repack" || sub == "steam" || sub == "heroic" || sub == "lutris" || sub == "modpack" || sub == "shadercache" || sub == "fitgirl" || sub == "dodi")
+            && tokens.iter().any(|t| t.starts_with(sub))
+        {
+            return true;
+        }
+
+        // Distinct compound keywords in full string
+        if (sub == "steam" || sub == "shadercache" || sub == "modpack" || sub == "savegame" || sub == "heroic" || sub == "lutris" || sub == "fitgirl" || sub == "dodi")
+            && lower.contains(sub)
+        {
+            return true;
+        }
     }
 
     false

@@ -67,7 +67,7 @@ impl FolderWatcher {
                     EventKind::Create(_) | EventKind::Modify(_) => {
                         let mut new_paths = Vec::new();
                         for path in event.paths {
-                            if Self::is_processable_file(&path) {
+                            if self.is_processable_file(&path) {
                                 new_paths.push(path);
                             }
                         }
@@ -89,15 +89,20 @@ impl FolderWatcher {
         None
     }
 
-    fn is_processable_file(path: &Path) -> bool {
+    fn is_processable_file(&self, path: &Path) -> bool {
         if !path.is_file() {
             return false;
         }
 
-        for comp in path.components() {
-            if let Some(name) = comp.as_os_str().to_str() {
-                if crate::classifier::filter::should_skip_directory(name) {
-                    return false;
+        // Only inspect directory components UNDER the watched root directory.
+        // Parent components above watched_dir must never cause files inside the workspace to be skipped.
+        let rel_path = path.strip_prefix(&self.watched_dir).unwrap_or(path);
+        if let Some(parent) = rel_path.parent() {
+            for comp in parent.components() {
+                if let Some(name) = comp.as_os_str().to_str() {
+                    if crate::classifier::filter::should_skip_directory(name) {
+                        return false;
+                    }
                 }
             }
         }

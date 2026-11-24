@@ -6,7 +6,7 @@ import numpy as np
 from difflib import SequenceMatcher
 from collections import Counter
 from config import INPUT_FOLDER, MAX_KEYWORDS
-INDEX_FILE = 'axel_index.json'
+INDEX_FILE = os.environ.get('AXEL_INDEX_FILE', os.environ.get('AXEL_INDEX_PATH', 'axel_index.json'))
 
 _index_cache = None
 _index_dirty = False
@@ -29,9 +29,22 @@ def _load_index():
 def _save_index():
     global _index_cache, _index_dirty
     if _index_cache is not None and _index_dirty:
-        with open(INDEX_FILE, 'w', encoding='utf-8') as f:
-            json.dump(_index_cache, f, indent=2)
-        _index_dirty = False
+        import time
+        temp_file = f"{INDEX_FILE}.{os.getpid()}.{int(time.time() * 1000)}.tmp"
+        try:
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(_index_cache, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_file, INDEX_FILE)
+            _index_dirty = False
+        except Exception as e:
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
+            print(f"[ERROR] Failed to atomically save index: {e}")
 
 def get_index():
     return _load_index()

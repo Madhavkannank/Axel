@@ -1,6 +1,18 @@
+import os
+import shutil
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 from PIL import Image
+
+# Cross-platform Tesseract executable discovery
+tesseract_env = os.environ.get("TESSERACT_CMD") or os.environ.get("AXEL_TESSERACT_PATH")
+if tesseract_env and os.path.exists(tesseract_env):
+    pytesseract.pytesseract.tesseract_cmd = tesseract_env
+elif shutil.which("tesseract"):
+    pytesseract.pytesseract.tesseract_cmd = "tesseract"
+elif os.name == "nt":
+    win_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.exists(win_path):
+        pytesseract.pytesseract.tesseract_cmd = win_path
 
 def extract_text_from_image(path):
     """Extracts text from an image using pytesseract."""

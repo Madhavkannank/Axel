@@ -508,26 +508,28 @@ class AxelDesktopApp(QMainWindow):
             self.file_browser.refresh()
     
     def show_statistics(self):
-        """Show project statistics."""
-        stats = f"""
-AXEL Project Statistics
+        """Show project statistics dynamically computed from the active index."""
+        try:
+            from utils.indexer import get_stats, get_index
+            from config import INPUT_FOLDER, MAX_KEYWORDS, TOP_K_RESULTS
+            s = get_stats()
+            idx = get_index()
+            total_kws = sum(len(item.get("keywords", [])) for item in idx)
+            stats = f"""AXEL Project Statistics
 
 📊 Processing Summary:
-  • Files indexed: TBD
-  • Categories detected: 14
-  • Average confidence: TBD
-  • Total keywords extracted: TBD
+  • Files indexed: {s['total_files']}
+  • Categories active: {s['total_categories']}
+  • Most frequent category: {s['most_common_category'] or 'None'} ({s['most_common_count']})
+  • Total keywords indexed: {total_kws}
 
-🎯 Model Performance:
-  • Classifier accuracy: 95.83%
-  • OCR success rate: ~85%
-  • LLM fallback rate: ~15%
-
-⚙️ Configuration:
-  • Input folder: input_files
-  • Max keywords per file: 10
-  • Top search results: 5
-        """
+⚙️ Active Configuration:
+  • Input folder: {INPUT_FOLDER}
+  • Max keywords per file: {MAX_KEYWORDS}
+  • Top search results: {TOP_K_RESULTS}
+"""
+        except Exception as e:
+            stats = f"AXEL Statistics\n\nCould not load index stats: {e}"
         QMessageBox.information(self, "Statistics", stats)
     
     def show_about(self):
