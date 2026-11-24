@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_image_filename_and_metadata_fallback() {
-        let path = Path::new("/home/maddy/Downloads/Study/Calculus_Lecture_Slide_Derivatives_2026.png");
+        let path = Path::new("/workspace/samples/Study/Calculus_Lecture_Slide_Derivatives_2026.png");
         let text = extract_image_filename_and_metadata_text(path);
         assert!(text.contains("Calculus"));
         assert!(text.contains("Lecture"));

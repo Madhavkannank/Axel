@@ -535,11 +535,11 @@ mod tests {
                 category: "Code/Vision".to_string(),
                 keywords: vec!["computer vision".to_string(), "opencv".to_string()],
                 symbols: vec!["sobel_x".to_string(), "sobel_y".to_string(), "image_path".to_string()],
-                path: "/home/maddy/Dl/10.py".to_string(),
+                path: "/workspace/projects/10.py".to_string(),
                 hash: "h10".to_string(),
                 indexed_at: None,
                 virtual_paths: Vec::new(),
-                physical_paths: vec!["/home/maddy/Dl/10.py".to_string()],
+                physical_paths: vec!["/workspace/projects/10.py".to_string()],
                 is_duplicate: false,
             },
             IndexItem {
@@ -547,11 +547,11 @@ mod tests {
                 category: "Code/Math".to_string(),
                 keywords: vec!["calculator".to_string(), "arithmetic".to_string(), "math".to_string()],
                 symbols: vec!["add".to_string(), "subtract".to_string(), "multiply".to_string()],
-                path: "/home/maddy/Dl/1.py".to_string(),
+                path: "/workspace/projects/1.py".to_string(),
                 hash: "h1".to_string(),
                 indexed_at: None,
                 virtual_paths: Vec::new(),
-                physical_paths: vec!["/home/maddy/Dl/1.py".to_string()],
+                physical_paths: vec!["/workspace/projects/1.py".to_string()],
                 is_duplicate: false,
             },
         ];
@@ -584,7 +584,7 @@ mod tests {
             category: "Academic".to_string(),
             keywords: vec!["calculus".to_string(), "derivatives".to_string(), "notes".to_string()],
             symbols: Vec::new(),
-            path: "/home/maddy/Downloads/calculus_notes.pdf".to_string(),
+            path: "/downloads/calculus_notes.pdf".to_string(),
             hash: "same_sha256_hash_123".to_string(),
             indexed_at: None,
             virtual_paths: vec!["Study Materials/Calculus/Notes".to_string()],
@@ -603,7 +603,7 @@ mod tests {
             category: "Academic".to_string(),
             keywords: vec!["calculus".to_string()],
             symbols: Vec::new(),
-            path: "/home/maddy/Downloads/calculus_notes (1).pdf".to_string(),
+            path: "/downloads/calculus_notes (1).pdf".to_string(),
             hash: "same_sha256_hash_123".to_string(),
             indexed_at: None,
             virtual_paths: Vec::new(),
@@ -620,8 +620,8 @@ mod tests {
         // Must be marked as duplicate with 2 physical paths tracked
         assert!(canonical.is_duplicate);
         assert_eq!(canonical.physical_paths.len(), 2);
-        assert!(canonical.physical_paths.contains(&"/home/maddy/Downloads/calculus_notes.pdf".to_string()));
-        assert!(canonical.physical_paths.contains(&"/home/maddy/Downloads/calculus_notes (1).pdf".to_string()));
+        assert!(canonical.physical_paths.contains(&"/downloads/calculus_notes.pdf".to_string()));
+        assert!(canonical.physical_paths.contains(&"/downloads/calculus_notes (1).pdf".to_string()));
 
         // Virtual pointers auto-computed
         assert!(!canonical.virtual_paths.is_empty());
@@ -636,11 +636,11 @@ mod tests {
                 category: "Code/Vision".to_string(),
                 keywords: vec!["computer vision".to_string(), "opencv".to_string()],
                 symbols: vec!["sobel_x".to_string(), "sobel_y".to_string(), "image_path".to_string()],
-                path: "/home/maddy/Dl/10.py".to_string(),
+                path: "/workspace/projects/10.py".to_string(),
                 hash: "h10".to_string(),
                 indexed_at: None,
                 virtual_paths: Vec::new(),
-                physical_paths: vec!["/home/maddy/Dl/10.py".to_string()],
+                physical_paths: vec!["/workspace/projects/10.py".to_string()],
                 is_duplicate: false,
             },
             IndexItem {
@@ -648,11 +648,11 @@ mod tests {
                 category: "Code/Math".to_string(),
                 keywords: vec!["calculator".to_string(), "arithmetic".to_string()],
                 symbols: vec!["add".to_string(), "subtract".to_string()],
-                path: "/home/maddy/Dl/1.py".to_string(),
+                path: "/workspace/projects/1.py".to_string(),
                 hash: "h1".to_string(),
                 indexed_at: None,
                 virtual_paths: Vec::new(),
-                physical_paths: vec!["/home/maddy/Dl/1.py".to_string(), "/home/maddy/Downloads/1.py".to_string()],
+                physical_paths: vec!["/workspace/projects/1.py".to_string(), "/downloads/1.py".to_string()],
                 is_duplicate: true,
             },
         ];
