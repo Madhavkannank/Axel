@@ -38,7 +38,8 @@ fn test_file_type_detection() {
     assert_eq!(detect_file_type("notes.txt"), FileType::Text);
     assert_eq!(detect_file_type("data.json"), FileType::Text);
     assert_eq!(detect_file_type("sheet.csv"), FileType::Text);
-    assert_eq!(detect_file_type("archive.tar.gz"), FileType::Unsupported);
+    assert_eq!(detect_file_type("archive.tar.gz"), FileType::Archive);
+    assert_eq!(detect_file_type("binary.bin"), FileType::Binary);
 }
 
 #[test]
@@ -225,9 +226,9 @@ fn test_watcher_filtering_and_duplicate_safety() {
     assert!(should_skip_directory(".venv"));
     assert!(should_skip_directory("mods"));
 
-    // 2. Binary and game files that watcher must ignore
-    assert!(should_skip_file(Path::new("game.pak"), Some(1024)));
-    assert!(should_skip_file(Path::new("setup.iso"), Some(1024)));
+    // 2. Temporary and lock files that watcher must ignore
+    assert!(should_skip_file(Path::new("download.crdownload"), Some(1024)));
+    assert!(should_skip_file(Path::new("cache.tmp"), Some(1024)));
     assert!(should_skip_file(Path::new("bundle.min.js"), Some(1024)));
     assert!(should_skip_file(Path::new("package-lock.json"), Some(1024)));
 

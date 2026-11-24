@@ -71,6 +71,62 @@ impl AiEngine {
                 };
 
                 if let Some(mut llm_res) = client.categorize(&prompt_text, &candidate_kws).await {
+                    let ext = std::path::Path::new(file_name)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    let clean_ext = ext.trim().trim_start_matches('.').to_lowercase();
+                    let is_video = crate::classifier::filter::is_video_extension(&clean_ext);
+
+                    // Refine with dynamic series name for episodic videos
+                    if is_video {
+                        if let Some(stem) = std::path::Path::new(file_name).file_stem().and_then(|s| s.to_str()) {
+                            let (series_title, _, _) = crate::extractor::video::parse_media_filename_metadata(stem);
+                            if let Some(series) = series_title {
+                                let clean = series.trim().to_string();
+                                if !clean.is_empty() {
+                                    llm_res.category = clean.clone();
+                                    if !llm_res.virtual_paths.iter().any(|p| p.starts_with(&clean)) {
+                                        llm_res.virtual_paths.insert(0, format!("{clean}/{file_name}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Refine with dynamic subject name for course/study materials
+                    let lower_name = file_name.to_lowercase();
+                    let is_study = crate::classifier::DOC_DESCRIPTOR_WORDS.iter().any(|&d| lower_name.contains(d));
+                    if is_study {
+                        let (dyn_cat, _dyn_vpaths) = crate::classifier::DynamicSemanticClassifier::classify(
+                            &sanitized_text,
+                            file_name,
+                            &candidate_kws,
+                            ext,
+                        );
+                        if !dyn_cat.is_empty() && !dyn_cat.starts_with("Documents/") && !dyn_cat.starts_with("Media/") {
+                            llm_res.category = dyn_cat.clone();
+                            if !llm_res.virtual_paths.iter().any(|p| p.starts_with(&dyn_cat)) {
+                                llm_res.virtual_paths.insert(0, format!("{dyn_cat}/{file_name}"));
+                            }
+                        }
+                    }
+
+                    // Fallback if LLM returned generic "General", "Video", or "Media"
+                    if llm_res.category.eq_ignore_ascii_case("general")
+                        || llm_res.category.eq_ignore_ascii_case("video")
+                        || llm_res.category.eq_ignore_ascii_case("media")
+                    {
+                        let (dyn_cat, dyn_vpaths) = crate::classifier::DynamicSemanticClassifier::classify(
+                            &sanitized_text,
+                            file_name,
+                            &candidate_kws,
+                            ext,
+                        );
+                        llm_res.category = dyn_cat;
+                        llm_res.virtual_paths = dyn_vpaths;
+                    }
+
                     llm_res.keywords = self.keywords.clean_keywords(llm_res.keywords, &sanitized_text, self.max_keywords);
                     return llm_res;
                 }

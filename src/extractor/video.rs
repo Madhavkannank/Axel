@@ -18,6 +18,117 @@ pub struct VideoIntelligence {
     pub format_tags: Vec<String>,
 }
 
+/// Parse television, webseries, and media filename stems into (Series Title, Season Episode, Episode Title)
+pub fn parse_media_filename_metadata(stem: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let clean_stem = stem.trim();
+    let parts: Vec<&str> = clean_stem
+        .split(|c: char| c == '_' || c == '.' || c == '-')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut season_ep_idx = None;
+    let mut season_ep_str = None;
+
+    for (idx, part) in parts.iter().enumerate() {
+        let p_upper = part.to_uppercase();
+        // Pattern 1: S01E02 or S1E2
+        if p_upper.starts_with('S') && p_upper.contains('E') {
+            let rest = &p_upper[1..];
+            if let Some(e_idx) = rest.find('E') {
+                let s_num = &rest[..e_idx];
+                let e_num = &rest[e_idx + 1..];
+                if s_num.chars().all(|c| c.is_ascii_digit())
+                    && e_num.chars().all(|c| c.is_ascii_digit())
+                    && !s_num.is_empty()
+                    && !e_num.is_empty()
+                {
+                    season_ep_idx = Some(idx);
+                    season_ep_str = Some(format!(
+                        "Season {}, Episode {}",
+                        s_num.trim_start_matches('0'),
+                        e_num.trim_start_matches('0')
+                    ));
+                    break;
+                }
+            }
+        }
+        // Pattern 2: 1x02 or 01x02
+        if let Some(x_idx) = p_upper.find('X') {
+            let s_num = &p_upper[..x_idx];
+            let e_num = &p_upper[x_idx + 1..];
+            if s_num.chars().all(|c| c.is_ascii_digit())
+                && e_num.chars().all(|c| c.is_ascii_digit())
+                && !s_num.is_empty()
+                && !e_num.is_empty()
+            {
+                season_ep_idx = Some(idx);
+                season_ep_str = Some(format!(
+                    "Season {}, Episode {}",
+                    s_num.trim_start_matches('0'),
+                    e_num.trim_start_matches('0')
+                ));
+                break;
+            }
+        }
+        // Pattern 3: EP02 or EPISODE 2
+        if (p_upper.starts_with("EP") || p_upper.starts_with("EPISODE")) && idx > 0 {
+            let num_part = p_upper.trim_start_matches("EPISODE").trim_start_matches("EP");
+            if num_part.chars().all(|c| c.is_ascii_digit()) && !num_part.is_empty() {
+                season_ep_idx = Some(idx);
+                season_ep_str = Some(format!("Episode {}", num_part.trim_start_matches('0')));
+                break;
+            }
+        }
+    }
+
+    if let Some(idx) = season_ep_idx {
+        let series_raw = &parts[..idx];
+        // Filter out release group bracket tags like [Judas] or (HorribleSubs)
+        let filtered_series: Vec<&str> = series_raw
+            .iter()
+            .copied()
+            .filter(|tok| !(tok.starts_with('[') && tok.ends_with(']')) && !(tok.starts_with('(') && tok.ends_with(')')))
+            .collect();
+
+        let series_title = if !filtered_series.is_empty() {
+            Some(filtered_series.join(" "))
+        } else if !series_raw.is_empty() {
+            Some(series_raw.join(" "))
+        } else {
+            None
+        };
+
+        // Clean episode title by truncating at standard release/codec/resolution tags
+        let ep_raw = &parts[idx + 1..];
+        let mut clean_ep_tokens = Vec::new();
+        const CODEC_TAGS: &[&str] = &[
+            "1080P", "720P", "4K", "2160P", "480P", "X264", "X265", "HEVC", "H264", "H265",
+            "10BIT", "8BIT", "WEBRIP", "BLURAY", "HDTV", "WEBDL", "WEB", "DUAL", "AUDIO",
+            "GER", "ENG", "ITA", "SPA", "FRA", "RUS", "HIN", "6CH", "5.1", "AAC", "DTS",
+            "AC3", "REPACK", "PROPER", "REMUX", "HDR", "SDR", "MULTI", "SUBS",
+        ];
+
+        for tok in ep_raw {
+            let tok_upper = tok.to_uppercase();
+            if CODEC_TAGS.contains(&tok_upper.as_str()) {
+                break;
+            }
+            clean_ep_tokens.push(*tok);
+        }
+
+        let episode_title = if !clean_ep_tokens.is_empty() {
+            Some(clean_ep_tokens.join(" "))
+        } else {
+            None
+        };
+
+        (series_title, season_ep_str, episode_title)
+    } else {
+        (None, None, None)
+    }
+}
+
 /// Extract searchable textual content and metadata from a video file.
 /// Designed for long videos (movies, multi-hour lectures, presentations):
 /// - Probes container headers via `ffprobe` without decoding raw video frames (< 1 MB RAM)
@@ -28,19 +139,32 @@ pub fn extract_video_text<P: AsRef<Path>>(path: P) -> (String, VideoIntelligence
     let mut intel = VideoIntelligence::default();
     let mut text_blocks = Vec::new();
 
-    // 1. Check for sidecar subtitle files (.srt, .vtt, .sub) beside the video
-    if let Some(sidecar_text) = find_and_read_sidecar_subtitles(path) {
-        if !sidecar_text.is_empty() {
-            intel.subtitle_text = sidecar_text.clone();
-            text_blocks.push(format!("Transcript:\n{sidecar_text}"));
+    // 1. Primary Title & Metadata from Filename (Highest semantic priority)
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        let (series_title, season_ep, episode_title) = parse_media_filename_metadata(stem);
+        if let Some(st) = series_title {
+            text_blocks.push(format!("Series Title: {st}"));
+            if intel.title.is_none() {
+                intel.title = Some(st);
+            }
         }
+        if let Some(se) = season_ep {
+            text_blocks.push(format!("Series Episode: {se}"));
+        }
+        if let Some(ep) = episode_title {
+            text_blocks.push(format!("Episode Name: {ep}"));
+        }
+        let cleaned_name = stem.replace(['_', '.', '-'], " ");
+        text_blocks.push(format!("Filename: {cleaned_name}"));
     }
 
     // 2. Probe container headers via ffprobe (if available)
     if let Ok(ffprobe_intel) = probe_container_headers(path) {
         if let Some(title) = &ffprobe_intel.title {
+            if intel.title.is_none() {
+                intel.title = Some(title.clone());
+            }
             text_blocks.push(format!("Title: {title}"));
-            intel.title = Some(title.clone());
         }
         if let Some(desc) = &ffprobe_intel.description {
             text_blocks.push(format!("Description: {desc}"));
@@ -59,18 +183,19 @@ pub fn extract_video_text<P: AsRef<Path>>(path: P) -> (String, VideoIntelligence
         intel.resolution = ffprobe_intel.resolution;
     }
 
-    // 3. If sidecar subtitle was not found, attempt embedded subtitle extraction via ffmpeg
-    if intel.subtitle_text.is_empty() {
-        if let Some(embedded_sub) = extract_embedded_subtitle_stream(path) {
-            intel.subtitle_text = embedded_sub.clone();
-            text_blocks.push(format!("Subtitles:\n{embedded_sub}"));
+    // 3. Subtitles / Transcript (Semantic enrichment, bounded to 2000 chars so dialogue never drowns title)
+    if let Some(sidecar_text) = find_and_read_sidecar_subtitles(path) {
+        if !sidecar_text.is_empty() {
+            let bounded_sub: String = sidecar_text.chars().take(2000).collect();
+            intel.subtitle_text = bounded_sub.clone();
+            text_blocks.push(format!("Transcript:\n{bounded_sub}"));
         }
-    }
-
-    // 4. Filename tokens (fallback / augmentation)
-    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        let cleaned_name = stem.replace(['_', '.', '-'], " ");
-        text_blocks.push(format!("Filename: {cleaned_name}"));
+    } else if let Some(embedded_sub) = extract_embedded_subtitle_stream(path) {
+        if !embedded_sub.is_empty() {
+            let bounded_sub: String = embedded_sub.chars().take(2000).collect();
+            intel.subtitle_text = bounded_sub.clone();
+            text_blocks.push(format!("Subtitles:\n{bounded_sub}"));
+        }
     }
 
     let combined_text = text_blocks.join("\n\n");

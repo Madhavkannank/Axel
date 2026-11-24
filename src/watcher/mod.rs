@@ -1,4 +1,3 @@
-use crate::extractor::{detect_file_type, FileType};
 use notify::{Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -108,6 +107,6 @@ impl FolderWatcher {
             return false;
         }
 
-        detect_file_type(path) != FileType::Unsupported
+        path.is_file()
     }
 }

@@ -4,9 +4,9 @@ use crate::classifier::{
 };
 use crate::config::{resolve_workspace_path, Config};
 use crate::extractor::{
-    detect_file_type, extract_raw_text, extract_text, ocr, preprocess_text, FileType,
+    detect_file_type, extract_raw_text, extract_text, ocr, preprocess_text,
 };
-use crate::index::{DocumentIndex, IndexItem};
+use crate::index::{DocumentIndex, FileMetadataTag, IndexItem};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -61,12 +61,32 @@ pub struct GraphSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileProperties {
+    pub file_name: String,
+    pub absolute_path: String,
+    pub parent_dir: String,
+    pub file_size_bytes: u64,
+    pub formatted_size: String,
+    pub file_type_desc: String,
+    pub created_str: String,
+    pub modified_str: String,
+    pub accessed_str: String,
+    pub permissions_mode: String,
+    pub is_readonly: bool,
+    pub is_symlink: bool,
+    pub has_xattrs: bool,
+    pub xattr_category: Option<String>,
+    pub xattr_keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentDetail {
     pub item: IndexItem,
     pub text_preview: String,
     pub file_exists: bool,
     pub file_type: String,
     pub size_bytes: Option<u64>,
+    pub properties: Option<FileProperties>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,13 +376,194 @@ pub fn build_document_detail(item: &IndexItem) -> DocumentDetail {
         "(Original document file is no longer accessible at this path)".to_string()
     };
 
+    let properties = if file_exists {
+        extract_file_properties(&path)
+    } else {
+        None
+    };
+
     DocumentDetail {
         item: item.clone(),
         text_preview,
         file_exists,
         file_type,
         size_bytes,
+        properties,
     }
+}
+
+fn format_int_with_commas(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(b as char);
+    }
+    result
+}
+
+pub fn format_bytes_precise(bytes: u64) -> String {
+    let commas = format_int_with_commas(bytes);
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB ({commas} bytes)", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!(
+            "{:.2} MB ({commas} bytes)",
+            bytes as f64 / (1024.0 * 1024.0)
+        )
+    } else {
+        format!(
+            "{:.2} GB ({commas} bytes)",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        )
+    }
+}
+
+#[cfg(unix)]
+fn format_unix_mode(mode: u32) -> String {
+    let mut s = String::with_capacity(10);
+    s.push(if mode & 0o40000 != 0 { 'd' } else { '-' });
+    s.push(if mode & 0o400 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o200 != 0 { 'w' } else { '-' });
+    s.push(if mode & 0o100 != 0 { 'x' } else { '-' });
+    s.push(if mode & 0o040 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o020 != 0 { 'w' } else { '-' });
+    s.push(if mode & 0o010 != 0 { 'x' } else { '-' });
+    s.push(if mode & 0o004 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o002 != 0 { 'w' } else { '-' });
+    s.push(if mode & 0o001 != 0 { 'x' } else { '-' });
+    s
+}
+
+pub fn extract_file_properties(path: &Path) -> Option<FileProperties> {
+    let md = std::fs::symlink_metadata(path).ok()?;
+    let is_symlink = md.file_type().is_symlink();
+    let actual_md = if is_symlink {
+        std::fs::metadata(path).unwrap_or_else(|_| md.clone())
+    } else {
+        md.clone()
+    };
+    let file_size_bytes = actual_md.len();
+    let formatted_size = format_bytes_precise(file_size_bytes);
+
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let absolute_path = std::fs::canonicalize(path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string());
+
+    let parent_dir = path
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| ".".to_string());
+
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let file_type_desc = match ext.as_str() {
+        "pdf" => "PDF Document (.pdf)".to_string(),
+        "docx" | "doc" => "Word Document (.docx)".to_string(),
+        "txt" => "Plain Text Document (.txt)".to_string(),
+        "md" => "Markdown Document (.md)".to_string(),
+        "mkv" => "Matroska Video (.mkv)".to_string(),
+        "mp4" => "MPEG-4 Video (.mp4)".to_string(),
+        "webm" => "WebM Video (.webm)".to_string(),
+        "mp3" => "MP3 Audio (.mp3)".to_string(),
+        "wav" => "WAV Audio (.wav)".to_string(),
+        "png" => "PNG Image (.png)".to_string(),
+        "jpg" | "jpeg" => "JPEG Image (.jpg)".to_string(),
+        "webp" => "WebP Image (.webp)".to_string(),
+        "py" => "Python Script (.py)".to_string(),
+        "rs" => "Rust Source (.rs)".to_string(),
+        "js" | "ts" => "JavaScript/TypeScript Code".to_string(),
+        "zip" | "tar" | "gz" | "7z" => "Compressed Archive".to_string(),
+        "iso" => "Disk Image (.iso)".to_string(),
+        _ => {
+            if ext.is_empty() {
+                "File".to_string()
+            } else {
+                format!("{} File (.{})", ext.to_uppercase(), ext)
+            }
+        }
+    };
+
+    let modified_str = actual_md
+        .modified()
+        .ok()
+        .map(|t| {
+            let dt: chrono::DateTime<chrono::Local> = t.into();
+            dt.format("%b %d, %Y  %I:%M %p").to_string()
+        })
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let created_str = actual_md
+        .created()
+        .ok()
+        .map(|t| {
+            let dt: chrono::DateTime<chrono::Local> = t.into();
+            dt.format("%b %d, %Y  %I:%M %p").to_string()
+        })
+        .unwrap_or_else(|| modified_str.clone());
+
+    let accessed_str = actual_md
+        .accessed()
+        .ok()
+        .map(|t| {
+            let dt: chrono::DateTime<chrono::Local> = t.into();
+            dt.format("%b %d, %Y  %I:%M %p").to_string()
+        })
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    #[cfg(unix)]
+    let permissions_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = actual_md.permissions().mode();
+        format!("{:04o} ({})", mode & 0o777, format_unix_mode(mode))
+    };
+    #[cfg(not(unix))]
+    let permissions_mode = if actual_md.permissions().readonly() {
+        "Read-only".to_string()
+    } else {
+        "Read and Write".to_string()
+    };
+
+    let is_readonly = actual_md.permissions().readonly();
+
+    let tag = crate::index::metadata::FileMetadataTag::read_from_file(path);
+    let xattr_category = tag.as_ref().map(|t| t.category.clone());
+    let xattr_keywords = tag.map(|t| t.keywords).unwrap_or_default();
+    let has_xattrs = xattr_category.is_some() || !xattr_keywords.is_empty();
+
+    Some(FileProperties {
+        file_name,
+        absolute_path,
+        parent_dir,
+        file_size_bytes,
+        formatted_size,
+        file_type_desc,
+        created_str,
+        modified_str,
+        accessed_str,
+        permissions_mode,
+        is_readonly,
+        is_symlink,
+        has_xattrs,
+        xattr_category,
+        xattr_keywords,
+    })
 }
 
 pub fn build_system_stats(config: &Config, index: &DocumentIndex) -> SystemStats {
@@ -441,7 +642,7 @@ pub async fn analyze_and_build_item_with_tfidf(
     mut tfidf: Option<&mut TfidfEngine>,
 ) -> Option<IndexItem> {
     let resolved = resolve_workspace_path(path);
-    if !resolved.exists() || detect_file_type(&resolved) == FileType::Unsupported {
+    if !resolved.exists() || !resolved.is_file() {
         return None;
     }
 
@@ -467,7 +668,7 @@ pub async fn analyze_and_build_item_with_tfidf(
         .unwrap_or("document")
         .to_string();
 
-    if is_script_extension(&ext) {
+    let item = if is_script_extension(&ext) {
         let mut tfidf_kws = Vec::new();
         if let Some(engine) = tfidf.as_deref_mut() {
             engine.register_document_terms(&raw_text, &[]);
@@ -476,7 +677,7 @@ pub async fn analyze_and_build_item_with_tfidf(
 
         let (ai_res, symbols) = ai.analyze_code_script(&raw_text, &file_name, &ext, &tfidf_kws).await;
 
-        Some(IndexItem::new(
+        IndexItem::new(
             file_name,
             ai_res.category,
             ai_res.keywords,
@@ -484,7 +685,7 @@ pub async fn analyze_and_build_item_with_tfidf(
             resolved.display().to_string(),
             hash,
             ai_res.virtual_paths,
-        ))
+        )
     } else {
         let mut tfidf_kws = Vec::new();
         if let Some(engine) = tfidf.as_deref_mut() {
@@ -495,7 +696,7 @@ pub async fn analyze_and_build_item_with_tfidf(
         let preprocessed = preprocess_text(&raw_text);
         let ai_res = ai.analyze_document(&preprocessed, &file_name, Some(&tfidf_kws)).await;
 
-        Some(IndexItem::new(
+        IndexItem::new(
             file_name,
             ai_res.category,
             ai_res.keywords,
@@ -503,8 +704,19 @@ pub async fn analyze_and_build_item_with_tfidf(
             resolved.display().to_string(),
             hash,
             ai_res.virtual_paths,
-        ))
-    }
+        )
+    };
+
+    // Permanently write dynamic tags directly into the file's extended attributes
+    let _ = FileMetadataTag::write_to_file(
+        &resolved,
+        &item.category,
+        &item.keywords,
+        &item.virtual_paths,
+        &item.hash,
+    );
+
+    Some(item)
 }
 
 pub async fn scan_folder_into_items(
@@ -553,9 +765,18 @@ where
             .unwrap_or("document")
             .to_string();
 
-        if detect_file_type(&path) == FileType::Unsupported {
-            skipped += 1;
-            continue;
+        // Fast metadata path: If the file already carries valid dynamic tags in its metadata (xattr),
+        // we can skip expensive disk reading, hashing, OCR, and classification entirely!
+        if !force {
+            if let Some(tagged_item) = FileMetadataTag::read_from_file(&path) {
+                if !existing_hashes.contains(&tagged_item.hash) {
+                    items_to_insert.push(tagged_item);
+                    indexed += 1;
+                } else {
+                    skipped += 1;
+                }
+                continue;
+            }
         }
 
         let path_for_hash = path.clone();
@@ -614,9 +835,6 @@ pub async fn ingest_local_files(
         if !src_path.exists() || !src_path.is_file() {
             continue;
         }
-        if detect_file_type(src_path) == FileType::Unsupported {
-            continue;
-        }
 
         let target_path = if copy_into_workspace {
             let file_name = src_path
@@ -661,6 +879,13 @@ pub fn is_path_inside_workspace(path: &Path, workspace_folder: &Path) -> bool {
     }
 }
 
+pub fn trash_file_safely(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("File does not exist on disk".to_string());
+    }
+    trash::delete(path).map_err(|e| format!("Failed to move file to trash: {e}"))
+}
+
 pub fn delete_document_from_index(
     hash: &str,
     delete_file: bool,
@@ -678,10 +903,10 @@ pub fn delete_document_from_index(
     let mut file_removed_from_disk = false;
     if delete_file {
         let target_path = Path::new(&removed.path);
-        if is_path_inside_workspace(target_path, &config.input_folder)
-            && std::fs::remove_file(target_path).is_ok()
-        {
-            file_removed_from_disk = true;
+        if is_path_inside_workspace(target_path, &config.input_folder) {
+            if trash::delete(target_path).is_ok() || std::fs::remove_file(target_path).is_ok() {
+                file_removed_from_disk = true;
+            }
         }
     }
 

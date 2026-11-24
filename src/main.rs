@@ -34,7 +34,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match cmd {
                     Commands::Scan { dir, force } => {
                         let target_dir = dir.unwrap_or(config.input_folder.clone());
-                        run_scan(&target_dir, force, &config).await?;
+                        let target_index = axel::config::workspace_index_path(
+                            &target_dir,
+                            &config.input_folder,
+                            &config.index_file,
+                        );
+                        run_scan(&target_dir, &target_index, force, &config).await?;
                     }
                     Commands::Watch { dir } => {
                         let target_dir = dir.unwrap_or(config.input_folder.clone());
@@ -67,6 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run_scan(
     target_dir: &Path,
+    target_index: &Path,
     force: bool,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -85,7 +91,7 @@ async fn run_scan(
         return Ok(());
     }
 
-    let mut index = DocumentIndex::load(&config.index_file);
+    let mut index = DocumentIndex::load(target_index);
     let ai = AiEngine::new(config);
 
     let existing_hashes: HashSet<String> = if force {

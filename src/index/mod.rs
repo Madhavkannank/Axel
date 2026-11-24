@@ -5,7 +5,9 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+pub mod metadata;
 pub mod virtual_tree;
+pub use metadata::FileMetadataTag;
 pub use virtual_tree::{
     build_virtual_tree, compute_virtual_paths, DuplicateCluster, VirtualFolder,
 };
@@ -82,7 +84,7 @@ pub struct DocumentIndex {
 impl DocumentIndex {
     pub fn load<P: AsRef<Path>>(index_path: P) -> Self {
         let file_path = index_path.as_ref().to_path_buf();
-        let items = if file_path.exists() {
+        let raw_items: Vec<IndexItem> = if file_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&file_path) {
                 serde_json::from_str(&content).unwrap_or_default()
             } else {
@@ -91,6 +93,17 @@ impl DocumentIndex {
         } else {
             Vec::new()
         };
+
+        // Filter out any legacy or invalid "General" items so they are properly re-indexed with dynamic tags
+        let items: Vec<IndexItem> = raw_items
+            .into_iter()
+            .filter(|item| {
+                let cat = item.category.trim();
+                !cat.is_empty()
+                    && !cat.eq_ignore_ascii_case("general")
+                    && !cat.eq_ignore_ascii_case("documents/general")
+            })
+            .collect();
 
         Self {
             file_path,

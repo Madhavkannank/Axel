@@ -1008,9 +1008,73 @@ pub fn render_workstation(
                             if row_resp.double_clicked() {
                                 panel_action = PanelAction::OpenFileExternal(node.path.clone());
                             }
+
+                            // Desktop File Manager Context Menu
+                            let node_path = node.path.clone();
+                            let node_file = node.file.clone();
+                            row_resp.context_menu(|ui| {
+                                ui.set_min_width(210.0);
+                                ui.spacing_mut().item_spacing.y = 4.0;
+
+                                if ui.button(egui::RichText::new("📂  Open File").font(font_medium(11.5))).clicked() {
+                                    panel_action = PanelAction::OpenFileExternal(node_path.clone());
+                                    ui.close();
+                                }
+                                if ui.button(egui::RichText::new("🔍  Reveal in Folder").font(font_medium(11.5))).clicked() {
+                                    panel_action = PanelAction::RevealFolderExternal(node_path.clone());
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button(egui::RichText::new("📋  Copy Path (Ctrl+C)").font(font_medium(11.5))).clicked() {
+                                    panel_action = PanelAction::CopyPath(node_path.clone());
+                                    ui.close();
+                                }
+                                if ui.button(egui::RichText::new("📝  Copy Name (Ctrl+Shift+C)").font(font_medium(11.5))).clicked() {
+                                    panel_action = PanelAction::CopyName(node_file.clone());
+                                    ui.close();
+                                }
+                                if ui.button(egui::RichText::new("🔗  Copy File URI").font(font_medium(11.5))).clicked() {
+                                    panel_action = PanelAction::CopyFileUri(node_path.clone());
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button(egui::RichText::new("ℹ️  Properties (Alt+Enter)").font(font_medium(11.5))).clicked() {
+                                    panel_action = PanelAction::OpenProperties(node_path.clone());
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button(egui::RichText::new("🗑  Move to Trash (Del)").font(font_medium(11.5)).color(p.danger)).clicked() {
+                                    panel_action = PanelAction::TrashFile(node_path.clone());
+                                    ui.close();
+                                }
+                            });
                         }
                     }
                 });
+
+            // Standard Keyboard Shortcuts for Selected Ledger Row
+            if let Some(sel_hash) = selected_node {
+                if let Some(node) = snapshot.nodes.iter().find(|n| &n.hash == sel_hash) {
+                    let is_c = ui.input(|i| i.key_pressed(egui::Key::C));
+                    let is_ctrl = ui.input(|i| i.modifiers.command);
+                    let is_shift = ui.input(|i| i.modifiers.shift);
+                    let is_alt = ui.input(|i| i.modifiers.alt);
+                    let is_enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let is_del = ui.input(|i| i.key_pressed(egui::Key::Delete));
+
+                    if is_ctrl && is_shift && is_c {
+                        panel_action = PanelAction::CopyName(node.file.clone());
+                    } else if is_ctrl && is_c {
+                        panel_action = PanelAction::CopyPath(node.path.clone());
+                    } else if is_alt && is_enter {
+                        panel_action = PanelAction::OpenProperties(node.path.clone());
+                    } else if is_enter {
+                        panel_action = PanelAction::OpenFileExternal(node.path.clone());
+                    } else if is_del {
+                        panel_action = PanelAction::TrashFile(node.path.clone());
+                    }
+                }
+            }
         });
 
     // ==========================================
@@ -1501,23 +1565,74 @@ fn render_inspector_content(
 
             ui.add_space(10.0);
 
+            // Filesystem Properties Card
+            if let Some(ref props) = detail.properties {
+                ui.label(
+                    egui::RichText::new("Filesystem Properties")
+                        .font(font_medium(11.0))
+                        .color(p.ink_muted),
+                );
+                ui.add_space(4.0);
+                Frame::new()
+                    .fill(p.bg_surface)
+                    .stroke(Stroke::new(1.0, p.border_subtle))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Size:").font(font_medium(10.0)).color(p.ink_muted));
+                            ui.label(egui::RichText::new(&props.formatted_size).font(font_mono(10.0)).color(p.copper_bright));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Type:").font(font_medium(10.0)).color(p.ink_muted));
+                            ui.label(egui::RichText::new(&props.file_type_desc).font(font_sans(10.0)).color(p.ink_primary));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Mode:").font(font_medium(10.0)).color(p.ink_muted));
+                            ui.label(egui::RichText::new(&props.permissions_mode).font(font_mono(10.0)).color(p.ink_secondary));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Modified:").font(font_medium(10.0)).color(p.ink_muted));
+                            ui.label(egui::RichText::new(&props.modified_str).font(font_sans(10.0)).color(p.ink_secondary));
+                        });
+                        if props.has_xattrs {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("xattr:").font(font_medium(10.0)).color(p.emerald));
+                                ui.label(egui::RichText::new("user.axel.* on Inode").font(font_mono(9.5)).color(p.emerald));
+                            });
+                        }
+                    });
+                ui.add_space(8.0);
+            }
+
             // Action Buttons
-            ui.horizontal(|ui| {
-                if ui.button(egui::RichText::new("Open File").font(font_medium(10.5))).clicked() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                if ui.button(egui::RichText::new("📂 Open").font(font_medium(10.5))).clicked() {
                     *panel_action = PanelAction::OpenFileExternal(detail.item.path.clone());
                 }
-                if ui.button(egui::RichText::new("In Folder").font(font_medium(10.5))).clicked() {
+                if ui.button(egui::RichText::new("🔍 Reveal").font(font_medium(10.5))).clicked() {
                     *panel_action = PanelAction::RevealFolderExternal(detail.item.path.clone());
                 }
+                if ui.button(egui::RichText::new("📋 Copy Path").font(font_medium(10.5))).clicked() {
+                    *panel_action = PanelAction::CopyPath(detail.item.path.clone());
+                }
+                if ui.button(egui::RichText::new("ℹ️ Properties").font(font_medium(10.5))).clicked() {
+                    *panel_action = PanelAction::OpenProperties(detail.item.path.clone());
+                }
+                if ui.button(egui::RichText::new("🗑 Move to Trash").font(font_medium(10.5)).color(p.danger)).clicked() {
+                    *panel_action = PanelAction::TrashFile(detail.item.path.clone());
+                }
                 if *confirm_delete {
-                    if ui.button(egui::RichText::new("Confirm Remove").font(font_medium(10.5)).color(p.danger)).clicked() {
+                    if ui.button(egui::RichText::new("Confirm Remove Index").font(font_medium(10.5)).color(p.danger)).clicked() {
                         *confirm_delete = false;
                         *panel_action = PanelAction::DeleteDocument {
                             hash: detail.item.hash.clone(),
                             delete_file: false,
                         };
                     }
-                } else if ui.button(egui::RichText::new("Remove").font(font_medium(10.5)).color(p.ink_muted)).clicked() {
+                } else if ui.button(egui::RichText::new("Remove Index").font(font_medium(10.5)).color(p.ink_muted)).clicked() {
                     *confirm_delete = true;
                 }
             });

@@ -3,7 +3,7 @@ use crate::desktop::theme::{
     accent_bright, accent_color, active_theme, draw_icon_activity, draw_icon_chevron_down,
     draw_icon_chevron_right, draw_icon_close, draw_icon_crosshair, draw_icon_file_type,
     draw_icon_folder, draw_icon_galaxy, draw_icon_gear, draw_icon_grid, draw_icon_links,
-    draw_icon_maximize, draw_icon_menu, draw_icon_minimize, draw_icon_palette, draw_icon_refresh,
+    draw_icon_maximize, draw_icon_minimize, draw_icon_palette, draw_icon_refresh,
     draw_icon_search, draw_icon_upload, draw_icon_workstation, font_medium, font_mono, font_sans,
     font_semibold, lerp_color, palette, with_alpha, ThemePreset,
 };
@@ -59,6 +59,13 @@ pub enum PanelAction {
     CloseTelemetry,
     CycleDropDock(isize),
     SelectDropDockIndex(usize),
+    // File Manager capabilities
+    CopyPath(String),
+    CopyName(String),
+    CopyFileUri(String),
+    TrashFile(String),
+    OpenProperties(String),
+    CloseProperties,
 }
 
 pub fn merge_action(current: &mut PanelAction, next: PanelAction) {
@@ -216,31 +223,8 @@ pub fn render_topbar(
             );
 
             ui.horizontal_centered(|ui| {
-                let (menu_rect, menu_resp) =
-                    ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
-                if menu_resp.hovered() {
-                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-                    ui.painter()
-                        .rect_filled(menu_rect, CornerRadius::same(7), p.bg_surface_hover);
-                }
-                draw_icon_menu(
-                    ui.painter(),
-                    menu_rect.center(),
-                    16.0,
-                    if menu_resp.hovered() {
-                        p.ink_primary
-                    } else {
-                        p.ink_secondary
-                    },
-                );
-                if menu_resp.on_hover_text("Toggle Activity Streams").clicked() {
-                    action = PanelAction::ToggleActivitySidebar;
-                }
-
-                ui.add_space(6.0);
-
                 // Workspace selector pill (opens Workspace Switcher Popover)
-                let pill_w = 248.0;
+                let pill_w = 254.0;
                 let (pill_rect, pill_resp) =
                     ui.allocate_exact_size(Vec2::new(pill_w, 32.0), Sense::click());
                 pill_anchor = pill_rect;
@@ -434,7 +418,7 @@ pub fn render_left_rail(
     view_mode: ViewMode,
     show_activity: bool,
     show_semantic_links: bool,
-    show_telemetry: bool,
+    _show_telemetry: bool,
 ) -> PanelAction {
     let mut action = PanelAction::None;
     let p = palette();
@@ -497,18 +481,21 @@ pub fn render_left_rail(
                     action = PanelAction::SetViewMode(ViewMode::ClusterGrid);
                 }
 
-                if rail_btn(
-                    ui,
-                    if show_semantic_links {
-                        "Hide Cross-File Semantic Links"
-                    } else {
-                        "Show Cross-File Semantic Links"
-                    },
-                    show_semantic_links,
-                    false,
-                    |painter, c, col| draw_icon_links(painter, c, 16.0, col),
-                ) {
-                    action = PanelAction::ToggleSemanticLinks;
+                // Show semantic link toggle only in 3D Galaxy view mode where it takes visual effect
+                if view_mode == ViewMode::Galaxy {
+                    if rail_btn(
+                        ui,
+                        if show_semantic_links {
+                            "Hide Cross-File Semantic Links"
+                        } else {
+                            "Show Cross-File Semantic Links"
+                        },
+                        show_semantic_links,
+                        false,
+                        |painter, c, col| draw_icon_links(painter, c, 16.0, col),
+                    ) {
+                        action = PanelAction::ToggleSemanticLinks;
+                    }
                 }
 
                 if rail_btn(ui, "Rescan Workspace (Ctrl+R)", false, false, |painter, c, col| {
@@ -517,9 +504,18 @@ pub fn render_left_rail(
                     action = PanelAction::TriggerScan { force: false };
                 }
 
-                let bottom_reserve = 126.0;
+                let bottom_reserve = if view_mode == ViewMode::Galaxy { 96.0 } else { 54.0 };
                 let spacer = (ui.available_height() - bottom_reserve).max(12.0);
                 ui.add_space(spacer);
+
+                // 3D Galaxy camera reset only visible in Galaxy mode
+                if view_mode == ViewMode::Galaxy {
+                    if rail_btn(ui, "Reset Camera (0)", false, false, |painter, c, col| {
+                        draw_icon_crosshair(painter, c, 16.0, col);
+                    }) {
+                        action = PanelAction::ResetCamera;
+                    }
+                }
 
                 if rail_btn(
                     ui,
@@ -529,22 +525,6 @@ pub fn render_left_rail(
                     |painter, c, col| draw_icon_activity(painter, c, 16.0, col),
                 ) {
                     action = PanelAction::ToggleActivitySidebar;
-                }
-
-                if rail_btn(ui, "Reset Camera (0)", false, false, |painter, c, col| {
-                    draw_icon_crosshair(painter, c, 16.0, col);
-                }) {
-                    action = PanelAction::ResetCamera;
-                }
-
-                if rail_btn(
-                    ui,
-                    "System Telemetry & Themes",
-                    show_telemetry,
-                    false,
-                    |painter, c, col| draw_icon_gear(painter, c, 16.0, col),
-                ) {
-                    action = PanelAction::ToggleTelemetryDrawer;
                 }
             });
         });

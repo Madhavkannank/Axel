@@ -12,6 +12,6 @@ pub use filter::{
 };
 pub use keywords::KeywordExtractor;
 pub use privacy::{is_high_risk_identity_document, redact_sensitive_pii, RedactionSummary};
-pub use semantic::DynamicSemanticClassifier;
+pub use semantic::{DynamicSemanticClassifier, DOC_DESCRIPTOR_WORDS};
 pub use tfidf::TfidfEngine;
 

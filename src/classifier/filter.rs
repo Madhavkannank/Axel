@@ -100,20 +100,6 @@ const SKIP_DIR_CONTAINS: &[&str] = &[
     "shadercache",
 ];
 
-const SKIP_FILE_EXTENSIONS: &[&str] = &[
-    // Game archives, disk images, VM images, ROMs
-    "iso", "bin", "cue", "dmg", "vdi", "vmdk", "qcow2", "pak", "vpk", "bsp", "wad", "dat",
-    "sav", "save", "rom", "nes", "sfc", "gba", "nds", "xci", "nsp",
-    // Compiled binaries and system libraries
-    "exe", "msi", "dll", "so", "dylib", "class", "pyc", "pyo", "pyd", "o", "obj", "a", "lib",
-    "jar", "war", "apk", "deb", "rpm", "cab", "elf",
-    // Multipart archive fragments
-    "part1.rar", "part01.rar", "r00", "r01", "7z", "rar",
-    // Audio and 3D meshes (not document text, code, or video)
-    "mp3", "wav", "flac", "ogg", "m4a", "aac", "fbx", "blend", "stl", "gltf", "glb",
-    "unitypackage", "torrent",
-];
-
 const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "flv", "wmv", "webm", "m4v",
 ];
@@ -157,7 +143,7 @@ pub fn should_skip_directory(name: &str) -> bool {
 }
 
 /// Determine if a file should be skipped.
-pub fn should_skip_file(path: &Path, file_size: Option<u64>) -> bool {
+pub fn should_skip_file(path: &Path, _file_size: Option<u64>) -> bool {
     let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
         return true;
     };
@@ -169,48 +155,19 @@ pub fn should_skip_file(path: &Path, file_size: Option<u64>) -> bool {
 
     let lower = file_name.to_lowercase();
 
-    // Minified code, source maps, and dependency lock files (megabytes of noise)
-    if lower.ends_with(".min.js")
+    // Minified code, source maps, in-progress downloads, and dependency lock files
+    if lower.ends_with(".crdownload")
+        || lower.ends_with(".part")
+        || lower.ends_with(".tmp")
+        || lower.ends_with(".swp")
+        || lower.ends_with(".min.js")
         || lower.ends_with(".min.css")
         || lower.ends_with(".bundle.js")
         || lower.ends_with(".map")
-        || lower.ends_with(".lock")
         || lower == "package-lock.json"
         || lower == "yarn.lock"
         || lower == "pnpm-lock.yaml"
         || lower == "cargo.lock"
-    {
-        return true;
-    }
-
-    // Check file extension
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_lowercase())
-        .unwrap_or_default();
-
-    if SKIP_FILE_EXTENSIONS.iter().any(|&e| e == ext) {
-        return true;
-    }
-
-    // File size filter: skip document/code files > 10MB to guarantee < 10MB RSS memory ceiling.
-    // Long video files (> 10MB) are permitted because they are probed via streaming container headers (< 1MB RAM)
-    if let Some(size) = file_size {
-        if !is_video_extension(&ext) && size > 10 * 1024 * 1024 {
-            return true;
-        }
-        // Text / script files larger than 1MB are almost always generated dumps or logs
-        if (is_script_extension(&ext) || is_doc_extension(&ext)) && size > 1024 * 1024 {
-            return true;
-        }
-    }
-
-    // Check if it's a known processable extension
-    if !is_doc_extension(&ext)
-        && !is_script_extension(&ext)
-        && !is_image_extension(&ext)
-        && !is_video_extension(&ext)
     {
         return true;
     }
@@ -254,19 +211,23 @@ mod tests {
     }
 
     #[test]
-    fn test_skip_game_and_binary_files() {
-        assert!(should_skip_file(Path::new("game.pak"), None));
-        assert!(should_skip_file(Path::new("installer.iso"), None));
-        assert!(should_skip_file(Path::new("payload.exe"), None));
+    fn test_skip_temporary_and_lock_files() {
+        assert!(should_skip_file(Path::new("download.crdownload"), None));
+        assert!(should_skip_file(Path::new("file.part"), None));
+        assert!(should_skip_file(Path::new("cache.tmp"), None));
         assert!(should_skip_file(Path::new("app.min.js"), None));
         assert!(should_skip_file(Path::new("package-lock.json"), None));
         assert!(should_skip_file(Path::new("Cargo.lock"), None));
     }
 
     #[test]
-    fn test_allow_normal_docs_and_scripts() {
+    fn test_allow_universal_files() {
         assert!(!should_skip_file(Path::new("invoice.pdf"), Some(50_000)));
         assert!(!should_skip_file(Path::new("thesis.docx"), Some(80_000)));
+        assert!(!should_skip_file(Path::new("5thSemQPs.pdf"), Some(15_000_000)));
+        assert!(!should_skip_file(Path::new("installer.iso"), Some(2_000_000_000)));
+        assert!(!should_skip_file(Path::new("archive.zip"), Some(500_000)));
+        assert!(!should_skip_file(Path::new("song.mp3"), Some(5_000_000)));
         assert!(!should_skip_file(Path::new("1.py"), Some(600)));
         assert!(!should_skip_file(Path::new("main.rs"), Some(4000)));
         assert!(!should_skip_file(Path::new("script.js"), Some(1200)));

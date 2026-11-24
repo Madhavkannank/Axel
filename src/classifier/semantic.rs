@@ -214,6 +214,18 @@ static DOMAIN_CENTROIDS: &[DomainCentroid] = &[
     },
 ];
 
+pub const DOC_DESCRIPTOR_WORDS: &[&str] = &[
+    "syllabus", "curriculum", "notes", "lecture", "lectures", "exam", "examination",
+    "exams", "qps", "qpaper", "question", "questions", "paper", "papers", "assignment",
+    "assignments", "midsem", "endsem", "semester", "sem", "unit", "units", "chapter",
+    "chapters", "module", "modules", "lab", "manual", "handout", "guide", "textbook",
+    "book", "slides", "part", "vol", "volume", "revision", "study", "material", "materials",
+    "course", "class", "reference", "dept", "department", "university", "college",
+    "test", "tests", "solution", "solutions", "internal", "assessment", "report",
+    "2018", "2019", "2020", "2021", "2022", "2023", "2024", "2025", "2026",
+    "msc", "bsc", "btech", "mtech", "phd", "be", "me", "ug", "pg",
+];
+
 pub struct DynamicSemanticClassifier;
 
 impl DynamicSemanticClassifier {
@@ -228,6 +240,10 @@ impl DynamicSemanticClassifier {
         ext: &str,
     ) -> (String, Vec<String>) {
         let clean_ext = ext.trim().trim_start_matches('.').to_lowercase();
+        let is_video = crate::classifier::filter::is_video_extension(&clean_ext);
+        let is_image = crate::classifier::filter::is_image_extension(&clean_ext);
+        let is_audio = matches!(clean_ext.as_str(), "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" | "wma");
+        let is_code = crate::classifier::filter::is_script_extension(&clean_ext);
 
         // 1. Tokenize document text and filename into normalized term frequency map
         let mut term_freq: HashMap<String, f32> = HashMap::new();
@@ -299,29 +315,77 @@ impl DynamicSemanticClassifier {
             }
         }
 
-        // 3. Fallback to file extension media types if textual similarity is low
-        let is_video = matches!(clean_ext.as_str(), "mp4" | "mkv" | "avi" | "mov" | "webm");
-        let is_image = matches!(clean_ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif" | "svg");
-        let is_audio = matches!(clean_ext.as_str(), "mp3" | "wav" | "flac" | "aac" | "ogg");
-        let is_code = matches!(clean_ext.as_str(), "rs" | "py" | "js" | "ts" | "c" | "cpp" | "go" | "java");
+        // 3. Dynamic Series & Media Classification for Videos (Zero hardcoded names)
+        if is_video {
+            if let Some(stem) = std::path::Path::new(file_name).file_stem().and_then(|s| s.to_str()) {
+                let (series_title, _season_ep, _episode_title) = crate::extractor::video::parse_media_filename_metadata(stem);
+                if let Some(series) = series_title {
+                    let clean_series = series.trim().to_string();
+                    if !clean_series.is_empty() {
+                        let vpaths = vec![
+                            format!("{clean_series}/{file_name}"),
+                            format!("Series/{clean_series}/{file_name}"),
+                            format!("Media/{clean_series}/{file_name}"),
+                        ];
+                        return (clean_series, vpaths);
+                    }
+                }
+            }
+        }
 
-        // 4. Synthesize dynamic category and virtual paths
+        // 4. Dynamic Subject Classification for Course Materials, Notes, Lectures, Syllabus, Exams
+        let is_study_material = {
+            let lower_name = file_name.to_lowercase();
+            DOC_DESCRIPTOR_WORDS.iter().any(|&desc| lower_name.contains(desc))
+                || best_domain.map_or(false, |d| d.name == "Academics")
+        };
+
+        if is_study_material {
+            if let Some(subject) = extract_salient_subject(&term_freq, extracted_keywords, file_name) {
+                let vpaths = vec![
+                    format!("{subject}/{file_name}"),
+                    format!("Academics/{subject}/{file_name}"),
+                    format!("Workspace/{subject}/{file_name}"),
+                ];
+                return (subject, vpaths);
+            }
+        }
+
+        // 5. Dynamic Topic Classification for General Documents and Media
         let threshold = 0.06;
 
         let (category, dynamic_subtopic) = if let Some(domain) = best_domain {
             if best_score >= threshold {
-                let subtopic = if let Some(matches) = domain_matching_terms.get(domain.name) {
-                    if let Some((top_term, _)) = matches.first() {
-                        synthesize_subtopic(domain.name, top_term, &clean_ext)
+                if domain.name == "Academics" {
+                    if let Some(subject) = extract_salient_subject(&term_freq, extracted_keywords, file_name) {
+                        (subject.clone(), subject)
                     } else {
-                        domain.default_subtopic.to_string()
+                        let subtopic = if let Some(matches) = domain_matching_terms.get(domain.name) {
+                            if let Some((top_term, _)) = matches.first() {
+                                synthesize_subtopic(domain.name, top_term, &clean_ext)
+                            } else {
+                                domain.default_subtopic.to_string()
+                            }
+                        } else {
+                            domain.default_subtopic.to_string()
+                        };
+                        (format!("{}/{}", domain.name, subtopic), subtopic)
                     }
                 } else {
-                    domain.default_subtopic.to_string()
-                };
-                (format!("{}/{}", domain.name, subtopic), subtopic)
+                    let subtopic = if let Some(matches) = domain_matching_terms.get(domain.name) {
+                        if let Some((top_term, _)) = matches.first() {
+                            synthesize_subtopic(domain.name, top_term, &clean_ext)
+                        } else {
+                            domain.default_subtopic.to_string()
+                        }
+                    } else {
+                        domain.default_subtopic.to_string()
+                    };
+                    (format!("{}/{}", domain.name, subtopic), subtopic)
+                }
             } else if is_video {
-                ("Media/Video".to_string(), "Video".to_string())
+                let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name);
+                (format!("Media/{}", dyn_topic), dyn_topic)
             } else if is_image {
                 ("Media/Visuals".to_string(), "Visuals".to_string())
             } else if is_audio {
@@ -333,7 +397,8 @@ impl DynamicSemanticClassifier {
                 (format!("Documents/{}", dynamic_topic), dynamic_topic)
             }
         } else if is_video {
-            ("Media/Video".to_string(), "Video".to_string())
+            let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name);
+            (format!("Media/{}", dyn_topic), dyn_topic)
         } else if is_image {
             ("Media/Visuals".to_string(), "Visuals".to_string())
         } else if is_audio {
@@ -413,6 +478,74 @@ fn synthesize_subtopic(domain: &str, top_term: &str, ext: &str) -> String {
     }
 }
 
+/// Dynamically extracts the academic subject name from filename and TF-IDF terms
+/// by filtering out document form descriptor words (notes, syllabus, exam, qps, lecture, etc.)
+fn extract_salient_subject(
+    term_freq: &HashMap<String, f32>,
+    extracted_keywords: &[String],
+    file_name: &str,
+) -> Option<String> {
+    // 1. Analyze filename tokens excluding descriptors
+    let file_stem = std::path::Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_name);
+
+    let raw_tokens: Vec<&str> = file_stem
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut subject_tokens = Vec::new();
+    for tok in raw_tokens {
+        let lower = tok.to_lowercase();
+        let trimmed_lower = lower.trim_end_matches(|c: char| c.is_ascii_digit());
+        if DOC_DESCRIPTOR_WORDS.contains(&lower.as_str())
+            || (!trimmed_lower.is_empty() && DOC_DESCRIPTOR_WORDS.contains(&trimmed_lower))
+            || lower.chars().all(|c| c.is_ascii_digit())
+            || (lower.len() < 3 && lower != "ai" && lower != "ml" && lower != "os" && lower != "db")
+        {
+            continue;
+        }
+        subject_tokens.push(capitalize(tok));
+    }
+
+    if !subject_tokens.is_empty() {
+        let count = subject_tokens.len().min(3);
+        let phrase = subject_tokens[..count].join(" ");
+        if !phrase.trim().is_empty() {
+            return Some(phrase);
+        }
+    }
+
+    // 2. Check extracted keywords excluding descriptors
+    for kw in extracted_keywords {
+        let clean = kw.trim().to_lowercase();
+        if !DOC_DESCRIPTOR_WORDS.contains(&clean.as_str())
+            && clean.len() >= 4
+            && !clean.contains("redacted")
+            && !clean.chars().all(|c| c.is_ascii_digit())
+        {
+            return Some(capitalize(&clean));
+        }
+    }
+
+    // 3. Check term frequencies sorted by weight excluding descriptors
+    let mut terms: Vec<_> = term_freq.iter().collect();
+    terms.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (term, _) in terms {
+        let clean = term.to_lowercase();
+        if !DOC_DESCRIPTOR_WORDS.contains(&clean.as_str())
+            && clean.len() >= 4
+            && !clean.chars().all(|c| c.is_ascii_digit())
+        {
+            return Some(capitalize(&clean));
+        }
+    }
+
+    None
+}
+
 /// Extracts the most salient topic term from the document when similarity is diffuse
 fn extract_salient_topic(
     term_freq: &HashMap<String, f32>,
@@ -452,5 +585,49 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         None => String::new(),
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_episodic_video_series_classification() {
+        let file = "Dark_S03E01_Déjà_vu_DUAL_AUDIO_GER_ENG_1080p_10bit_WEBRip_6CH_x265.mkv";
+        let (category, vpaths) = DynamicSemanticClassifier::classify("", file, &[], "mkv");
+        assert_eq!(category, "Dark");
+        assert!(vpaths.contains(&format!("Dark/{file}")));
+        assert!(vpaths.contains(&format!("Series/Dark/{file}")));
+    }
+
+    #[test]
+    fn test_subject_notes_classification() {
+        let file = "2021-MSc Data Science - Syllabus Book.pdf";
+        let text = "Curriculum and course outline for Data Science Master of Science semester syllabus.";
+        let (category, vpaths) = DynamicSemanticClassifier::classify(text, file, &["data science".to_string(), "syllabus".to_string()], "pdf");
+        assert_eq!(category, "Data Science");
+        assert!(vpaths.contains(&format!("Data Science/{file}")));
+    }
+
+    #[test]
+    fn test_operating_systems_subject_classification() {
+        let file = "Operating_Systems_Lecture1.pdf";
+        let text = "Operating systems kernel memory virtualisation and CPU scheduling.";
+        let (category, _) = DynamicSemanticClassifier::classify(text, file, &["operating systems".to_string()], "pdf");
+        assert_eq!(category, "Operating Systems");
+    }
+
+    #[test]
+    fn test_never_returns_general() {
+        let files = [
+            ("sample.txt", "Random unstructured text without specific centroid keywords."),
+            ("audio.mp3", ""),
+            ("archive.zip", ""),
+        ];
+        for (f, t) in files {
+            let (cat, _) = DynamicSemanticClassifier::classify(t, f, &[], "txt");
+            assert_ne!(cat, "General");
+        }
     }
 }

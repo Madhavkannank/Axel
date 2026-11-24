@@ -13,8 +13,10 @@ pub enum FileType {
     Docx,
     Image,
     Video,
+    Audio,
+    Archive,
     Text,
-    Unsupported,
+    Binary,
 }
 
 impl FileType {
@@ -24,8 +26,10 @@ impl FileType {
             FileType::Docx => "docx",
             FileType::Image => "image",
             FileType::Video => "video",
+            FileType::Audio => "audio",
+            FileType::Archive => "archive",
             FileType::Text => "text",
-            FileType::Unsupported => "unsupported",
+            FileType::Binary => "binary",
         }
     }
 }
@@ -34,20 +38,22 @@ pub fn detect_file_type<P: AsRef<Path>>(path: P) -> FileType {
     let path = path.as_ref();
     let ext = match path.extension().and_then(|s| s.to_str()) {
         Some(e) => e.to_lowercase(),
-        None => return FileType::Unsupported,
+        None => return FileType::Binary,
     };
 
     match ext.as_str() {
         "pdf" => FileType::Pdf,
-        "docx" => FileType::Docx,
-        "jpg" | "jpeg" | "png" | "tiff" | "tif" | "bmp" | "webp" | "gif" => FileType::Image,
-        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "m4v" => FileType::Video,
+        "docx" | "doc" | "odt" | "rtf" => FileType::Docx,
+        "jpg" | "jpeg" | "png" | "tiff" | "tif" | "bmp" | "webp" | "gif" | "svg" | "ico" => FileType::Image,
+        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "m4v" | "wmv" => FileType::Video,
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" | "wma" => FileType::Audio,
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "tgz" => FileType::Archive,
         "txt" | "md" | "markdown" | "csv" | "tsv" | "json" | "jsonl" | "yaml" | "yml"
         | "toml" | "xml" | "html" | "htm" | "css" | "scss" | "js" | "jsx" | "ts" | "tsx"
         | "py" | "rs" | "go" | "java" | "c" | "cpp" | "cc" | "h" | "hpp" | "sh" | "bash"
-        | "zsh" | "sql" | "log" | "ini" | "cfg" | "conf" | "tex" | "bib" | "rtf" | "org"
-        | "rst" => FileType::Text,
-        _ => FileType::Unsupported,
+        | "zsh" | "sql" | "log" | "ini" | "cfg" | "conf" | "tex" | "bib" | "org"
+        | "rst" | "diff" | "patch" => FileType::Text,
+        _ => FileType::Binary,
     }
 }
 
@@ -66,11 +72,40 @@ pub fn extract_raw_text<P: AsRef<Path>>(path: P) -> (String, FileType) {
         FileType::Docx => docx::extract_text(path).unwrap_or_default(),
         FileType::Image => ocr::extract_text(path).unwrap_or_default(),
         FileType::Video => video::extract_video_text(path).0,
+        FileType::Audio => extract_audio_metadata(path),
+        FileType::Archive => extract_archive_metadata(path),
         FileType::Text => read_text_capped(path, 256 * 1024),
-        FileType::Unsupported => String::new(),
+        FileType::Binary => extract_binary_metadata(path),
     };
 
     (raw_text, file_type)
+}
+
+fn extract_audio_metadata(path: &Path) -> String {
+    let mut parts = Vec::new();
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        let clean = stem.replace(['_', '-', '.'], " ");
+        parts.push(format!("Audio: {clean}"));
+    }
+    parts.join("\n")
+}
+
+fn extract_archive_metadata(path: &Path) -> String {
+    let mut parts = Vec::new();
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        let clean = stem.replace(['_', '-', '.'], " ");
+        parts.push(format!("Archive: {clean}"));
+    }
+    parts.join("\n")
+}
+
+fn extract_binary_metadata(path: &Path) -> String {
+    let mut parts = Vec::new();
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        let clean = stem.replace(['_', '-', '.'], " ");
+        parts.push(format!("File: {clean}"));
+    }
+    parts.join("\n")
 }
 
 fn read_text_capped(path: &Path, max_bytes: usize) -> String {

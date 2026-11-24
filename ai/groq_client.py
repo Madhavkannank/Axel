@@ -107,7 +107,8 @@ def generate_keywords(text, ml_category=None, ml_keywords=None):
         ml_context = f"\n    I already have a machine learning guess:\n    Suggested ML Category: {ml_category}\n    Suggested ML Keywords: {', '.join(ml_keywords)}\n    Use the ML suggestions to guide your output if they seem correct. Otherwise, improve them.\n"
 
     prompt = f"""
-    Analyze the following text and provide a category and a list of MAXIMUM 5 keywords.{ml_context}
+    Analyze the following text and provide a category and a list of MAXIMUM 5 keywords. The keywords are used to add a tag into the meta data for faster searching using general terms ,
+    analyse the texts correctly , and provide the keywords , dont choose unusual words {ml_context}
     You MUST output STRICT JSON in the following format ONLY:
     {{
         "category": "...",

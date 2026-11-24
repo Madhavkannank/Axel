@@ -20,6 +20,7 @@ impl Default for CorpusVocabulary {
 pub struct TfidfEngine {
     vocab: CorpusVocabulary,
     stopwords: HashSet<&'static str>,
+    short_acronym_allowlist: HashSet<&'static str>,
     storage_path: Option<PathBuf>,
     dirty: bool,
 }
@@ -27,6 +28,7 @@ pub struct TfidfEngine {
 impl TfidfEngine {
     pub fn new(storage_path: Option<PathBuf>) -> Self {
         let stopwords = [
+            // English Grammar, Articles & Prepositions
             "the", "and", "this", "that", "with", "from", "for", "have", "been", "they",
             "will", "would", "there", "their", "what", "about", "which", "when", "make",
             "like", "time", "just", "know", "take", "people", "into", "year", "your",
@@ -38,8 +40,39 @@ impl TfidfEngine {
             "using", "used", "present", "same", "before", "getting", "based", "each",
             "such", "more", "very", "here", "where", "while", "should", "must", "shall",
             "between", "through", "under", "above", "below", "within", "without", "both",
+            "again", "further", "once", "down", "during", "behind", "around", "among",
+            "since", "still", "until", "upon", "therefore", "across", "along", "already",
+            // Pronouns & Possessives
+            "you", "your", "yours", "yourself", "yourselves", "he", "him", "his", "himself",
+            "she", "her", "hers", "herself", "they", "them", "their", "theirs", "we", "us",
+            "our", "ours", "who", "whom", "whose", "which", "what", "someone", "something",
+            // Conversational & Contraction noise
+            "don", "doesn", "didn", "hasn", "haven", "hadn", "won", "wouldn", "shan",
+            "shouldn", "cannot", "couldn", "mustn", "needn", "ain", "aren", "isn",
+            "wasn", "weren", "gonna", "wanna", "gotta", "yeah", "yep", "nope", "okay",
+            "alright", "sure", "maybe", "please", "thank", "thanks", "hello", "hey",
+            "listen", "tell", "told", "talk", "came", "went", "gone", "seem", "thing",
+            "things", "stuff", "guy", "guys", "man", "woman", "boy", "girl", "sir",
+            // German stopwords
+            "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "eines",
+            "einem", "einen", "und", "oder", "aber", "mit", "von", "zu", "im", "in",
+            "am", "an", "auf", "aus", "bei", "nach", "uber", "über", "unter", "vor",
+            "zwischen", "ich", "du", "er", "sie", "es", "wir", "ihr", "mich", "dich",
+            "ihn", "uns", "euch", "ihnen", "sein", "seine", "nicht", "auch", "so",
+            "wie", "wenn", "dass", "da", "hier", "dort", "ja", "nein", "doch", "noch",
+            "schon", "nur", "immer", "wieder", "sehr", "etwas", "nichts", "alles",
+            // Extensions & code noise
             "txt", "pdf", "docx", "png", "jpg", "jpeg", "webp", "md", "json", "csv",
             "self", "true", "false", "none", "null", "return", "import", "class", "def",
+        ]
+        .into_iter()
+        .collect();
+
+        let short_acronym_allowlist = [
+            "pdf", "doc", "sql", "api", "git", "csv", "jpg", "png", "svg", "xml",
+            "app", "bot", "vtt", "srt", "cpu", "gpu", "ram", "rom", "ssh", "cli",
+            "sdk", "zip", "tar", "log", "css", "vue", "npm", "pip", "url", "uri",
+            "dns", "ssl", "tls", "key", "web", "net", "ai", "ml", "dev", "ops",
         ]
         .into_iter()
         .collect();
@@ -53,6 +86,7 @@ impl TfidfEngine {
         Self {
             vocab,
             stopwords,
+            short_acronym_allowlist,
             storage_path,
             dirty: false,
         }
@@ -176,11 +210,14 @@ impl TfidfEngine {
 
         // 1. Candidate terms from text
         for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
-            let lower = word.to_lowercase();
-            if lower.len() >= 3 && lower.len() <= 32 {
-                let alpha_count = lower.chars().filter(|c| c.is_alphabetic()).count();
-                if alpha_count >= 2 && !self.stopwords.contains(lower.as_str()) {
-                    *counts.entry(lower).or_insert(0) += 1;
+            let clean = word.trim_matches('_').to_lowercase();
+            let len = clean.chars().count();
+            let is_acronym = self.short_acronym_allowlist.contains(clean.as_str());
+
+            if (len >= 4 && len <= 32) || (len == 3 && is_acronym) {
+                let alpha_count = clean.chars().filter(|c| c.is_alphabetic()).count();
+                if alpha_count >= 2 && !self.stopwords.contains(clean.as_str()) {
+                    *counts.entry(clean).or_insert(0) += 1;
                 }
             }
         }

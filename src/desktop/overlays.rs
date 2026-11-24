@@ -1543,3 +1543,143 @@ fn action_pill_btn(ui: &mut Ui, label: &str, accent: Color32, enabled: bool) -> 
 pub fn apply_overlay_action(current: &mut PanelAction, next: PanelAction) {
     merge_action(current, next);
 }
+
+pub fn render_properties_modal(
+    ctx: &egui::Context,
+    props: &crate::engine::FileProperties,
+) -> PanelAction {
+    let mut action = PanelAction::None;
+    let p = palette();
+
+    let modal_w = 480.0;
+    egui::Window::new(format!("Properties — {}", truncate_label(&props.file_name, 28)))
+        .id(Id::unique("axel_file_properties_modal"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(modal_w)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .frame(
+            Frame::new()
+                .fill(with_alpha(p.bg_chrome, 252))
+                .stroke(Stroke::new(1.0, p.border_strong))
+                .corner_radius(CornerRadius::same(12))
+                .inner_margin(Margin::same(16)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(modal_w - 32.0);
+
+            // Header with filename and close
+            ui.horizontal(|ui| {
+                let (ic_rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
+                let ext = Path::new(&props.file_name)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                draw_icon_file_type(ui.painter(), ic_rect.center(), 18.0, ext, p.indigo_bright);
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(&props.file_name)
+                            .font(font_semibold(13.5))
+                            .color(p.ink_primary),
+                    );
+                    ui.label(
+                        egui::RichText::new(&props.file_type_desc)
+                            .font(font_sans(11.0))
+                            .color(p.ink_muted),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                    let (c_rect, c_resp) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
+                    draw_icon_close(
+                        ui.painter(),
+                        c_rect.center(),
+                        10.0,
+                        if c_resp.hovered() { p.ink_primary } else { p.ink_muted },
+                    );
+                    if c_resp.clicked() {
+                        action = PanelAction::CloseProperties;
+                    }
+                });
+            });
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            // Properties Grid
+            egui::Grid::new("file_props_grid")
+                .num_columns(2)
+                .spacing([14.0, 8.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Location:").font(font_medium(11.0)).color(p.ink_muted));
+                    ui.label(egui::RichText::new(&props.parent_dir).font(font_mono(10.5)).color(p.ink_secondary));
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("Absolute Path:").font(font_medium(11.0)).color(p.ink_muted));
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(truncate_label(&props.absolute_path, 34)).font(font_mono(10.5)).color(p.ink_primary));
+                        if ui.small_button("Copy").clicked() {
+                            action = PanelAction::CopyPath(props.absolute_path.clone());
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("File Size:").font(font_medium(11.0)).color(p.ink_muted));
+                    ui.label(egui::RichText::new(&props.formatted_size).font(font_mono(11.0)).color(p.copper_bright));
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("Permissions:").font(font_medium(11.0)).color(p.ink_muted));
+                    ui.label(egui::RichText::new(&props.permissions_mode).font(font_mono(10.5)).color(p.ink_secondary));
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("Created:").font(font_medium(11.0)).color(p.ink_muted));
+                    ui.label(egui::RichText::new(&props.created_str).font(font_sans(11.0)).color(p.ink_secondary));
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("Modified:").font(font_medium(11.0)).color(p.ink_muted));
+                    ui.label(egui::RichText::new(&props.modified_str).font(font_sans(11.0)).color(p.ink_secondary));
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("Accessed:").font(font_medium(11.0)).color(p.ink_muted));
+                    ui.label(egui::RichText::new(&props.accessed_str).font(font_sans(11.0)).color(p.ink_secondary));
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("Extended Attr:").font(font_medium(11.0)).color(p.ink_muted));
+                    if props.has_xattrs {
+                        let cat = props.xattr_category.as_deref().unwrap_or("none");
+                        ui.label(egui::RichText::new(format!("user.axel.* [Category: {cat}]")).font(font_mono(10.5)).color(p.emerald));
+                    } else {
+                        ui.label(egui::RichText::new("None (not tagged to inode)").font(font_sans(10.5)).color(p.ink_muted));
+                    }
+                    ui.end_row();
+                });
+
+            ui.add_space(14.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            // Bottom Buttons
+            ui.horizontal(|ui| {
+                if ui.button(egui::RichText::new("📂 Open File").font(font_medium(11.0))).clicked() {
+                    action = PanelAction::OpenFileExternal(props.absolute_path.clone());
+                }
+                if ui.button(egui::RichText::new("🔍 In Folder").font(font_medium(11.0))).clicked() {
+                    action = PanelAction::RevealFolderExternal(props.absolute_path.clone());
+                }
+                if ui.button(egui::RichText::new("📋 Copy Path").font(font_medium(11.0))).clicked() {
+                    action = PanelAction::CopyPath(props.absolute_path.clone());
+                }
+                if ui.button(egui::RichText::new("🗑 Move to Trash").font(font_medium(11.0)).color(p.danger)).clicked() {
+                    action = PanelAction::TrashFile(props.absolute_path.clone());
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button(egui::RichText::new("Close").font(font_medium(11.0))).clicked() {
+                        action = PanelAction::CloseProperties;
+                    }
+                });
+            });
+        });
+
+    action
+}

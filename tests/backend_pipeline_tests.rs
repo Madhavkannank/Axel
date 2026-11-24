@@ -38,13 +38,15 @@ async fn test_smart_filtering_rules() {
     assert!(!should_skip_directory("projects"));
     assert!(!should_skip_directory("documents"));
 
-    // 2. File skips
-    assert!(should_skip_file(PathBuf::from("/games/data.pak").as_path(), Some(500_000)));
-    assert!(should_skip_file(PathBuf::from("/games/setup.iso").as_path(), Some(1_000_000)));
+    // 2. File skips: temporary files, lock files, minified bundles
+    assert!(should_skip_file(PathBuf::from("/downloads/file.crdownload").as_path(), Some(500_000)));
+    assert!(should_skip_file(PathBuf::from("/downloads/temp.tmp").as_path(), Some(1_000_000)));
     assert!(should_skip_file(PathBuf::from("/app/package-lock.json").as_path(), Some(50_000)));
     assert!(should_skip_file(PathBuf::from("/app/dist/bundle.min.js").as_path(), Some(80_000)));
 
-    // Allowed files: documents and user scripts (even with obscure names like 1.py or 10.py)
+    // Allowed files: all universal user files (documents, archives, code, audio/video)
+    assert!(!should_skip_file(PathBuf::from("/games/data.pak").as_path(), Some(500_000)));
+    assert!(!should_skip_file(PathBuf::from("/games/setup.iso").as_path(), Some(1_000_000)));
     assert!(!should_skip_file(PathBuf::from("/home/user/1.py").as_path(), Some(300)));
     assert!(!should_skip_file(PathBuf::from("/home/user/10.py").as_path(), Some(450)));
     assert!(!should_skip_file(PathBuf::from("/home/user/main.rs").as_path(), Some(1200)));

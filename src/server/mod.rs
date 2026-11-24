@@ -5,7 +5,7 @@ use crate::engine::{
     delete_document_from_index, scan_folder_into_items, DocumentDetail, GraphSnapshot, ScanSummary,
     SystemStats,
 };
-use crate::extractor::{detect_file_type, extract_text, FileType};
+use crate::extractor::extract_text;
 use crate::index::{DocumentIndex, IndexItem};
 use crate::watcher::FolderWatcher;
 use axum::{
@@ -115,7 +115,7 @@ fn spawn_background_watcher(state: AppState) {
     tokio::spawn(async move {
         while let Some(path) = rx.recv().await {
             tokio::time::sleep(Duration::from_millis(350)).await;
-            if !path.exists() || detect_file_type(&path) == FileType::Unsupported {
+            if !path.exists() || !path.is_file() {
                 continue;
             }
 

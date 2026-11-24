@@ -12,8 +12,9 @@ use crate::desktop::galaxy::{
 };
 use crate::desktop::panels::{
     merge_action, render_activity_sidebar, render_drop_dock_overlay, render_inspector_drawer,
-    render_left_rail, render_semantic_search_overlay, render_telemetry_drawer, render_titlebar,
-    render_topbar, render_workspace_switcher_popover, PanelAction, ViewMode,
+    render_left_rail, render_properties_modal, render_semantic_search_overlay,
+    render_telemetry_drawer, render_titlebar, render_topbar, render_workspace_switcher_popover,
+    PanelAction, ViewMode,
 };
 use crate::desktop::theme::{
     active_theme, font_medium, font_sans, install_fonts_and_theme, palette, set_active_theme,
@@ -22,10 +23,10 @@ use crate::desktop::theme::{
 use crate::desktop::workstation::render_workstation;
 use crate::engine::{
     analyze_and_build_item, build_document_detail, build_graph_snapshot, build_system_stats,
-    delete_document_from_index, ingest_local_files, scan_folder_into_items, DocumentDetail,
-    GraphSnapshot, SystemStats,
+    delete_document_from_index, extract_file_properties, ingest_local_files, scan_folder_into_items,
+    DocumentDetail, FileProperties, GraphSnapshot, ScanSummary, SystemStats,
 };
-use crate::index::{DocumentIndex, IndexItem, SearchResult};
+use crate::index::{DocumentIndex, FileMetadataTag, IndexItem, SearchResult};
 use crate::watcher::FolderWatcher;
 use egui::{
     ColorImage, CornerRadius, Frame, Id, Key, Order, Pos2, Rect, Stroke, StrokeKind,
@@ -46,6 +47,7 @@ enum WorkerCommand {
     DeleteDocument { hash: String, delete_file: bool },
     TrashDuplicateFile { canonical_hash: String, trash_path: String },
     TrashAllDuplicates,
+    TrashFile(String),
 }
 
 enum WorkerEvent {
@@ -108,6 +110,7 @@ pub struct AxelDesktopApp {
     frames_rendered: u32,
     snapshot_ready: bool,
     started_at: Instant,
+    properties_target: Option<FileProperties>,
 }
 
 impl AxelDesktopApp {
@@ -193,6 +196,7 @@ impl AxelDesktopApp {
             frames_rendered: 0,
             snapshot_ready: false,
             started_at: Instant::now(),
+            properties_target: None,
         }
     }
 
@@ -324,14 +328,19 @@ impl AxelDesktopApp {
                 let ctx_clone = ctx.clone();
                 std::thread::spawn(move || {
                     if let Some(paths) = rfd::FileDialog::new()
-                        .set_title("Ingest Documents into AXEL")
+                        .set_title("Ingest Files into AXEL")
                         .add_filter(
-                            "Documents & Images",
+                            "All Supported Files",
                             &[
-                                "pdf", "docx", "txt", "md", "csv", "json", "png", "jpg", "jpeg",
-                                "webp", "tiff", "bmp",
+                                "pdf", "docx", "doc", "odt", "rtf", "txt", "md", "csv", "tsv", "json", "yaml", "yml", "toml", "xml",
+                                "png", "jpg", "jpeg", "webp", "tiff", "bmp", "gif", "svg", "ico",
+                                "mp4", "mkv", "avi", "mov", "webm", "flv", "m4v", "wmv",
+                                "mp3", "wav", "flac", "ogg", "m4a", "aac", "opus", "wma",
+                                "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst", "iso", "deb", "rpm",
+                                "py", "rs", "go", "java", "c", "cpp", "h", "hpp", "js", "ts", "jsx", "tsx", "sh", "sql", "html", "css",
                             ],
                         )
+                        .add_filter("All Files (*.*)", &["*"])
                         .pick_files()
                     {
                         if !paths.is_empty() {
@@ -497,6 +506,29 @@ impl AxelDesktopApp {
                 self.status_text = Some("Running batch deduplication...".to_string());
                 let _ = self.cmd_tx.send(WorkerCommand::TrashAllDuplicates);
             }
+            PanelAction::CopyPath(path) => {
+                ctx.copy_text(path);
+            }
+            PanelAction::CopyName(name) => {
+                ctx.copy_text(name);
+            }
+            PanelAction::CopyFileUri(path) => {
+                ctx.copy_text(format!("file://{path}"));
+            }
+            PanelAction::OpenProperties(path) => {
+                if let Some(props) = extract_file_properties(Path::new(&path)) {
+                    self.properties_target = Some(props);
+                }
+            }
+            PanelAction::CloseProperties => {
+                self.properties_target = None;
+            }
+            PanelAction::TrashFile(path) => {
+                self.properties_target = None;
+                self.is_busy = true;
+                self.status_text = Some("Moving file to OS trash...".to_string());
+                let _ = self.cmd_tx.send(WorkerCommand::TrashFile(path));
+            }
         }
     }
 
@@ -528,7 +560,9 @@ impl AxelDesktopApp {
             self.camera.reset();
         }
         if esc {
-            if self.search_popover_open {
+            if self.properties_target.is_some() {
+                self.properties_target = None;
+            } else if self.search_popover_open {
                 self.search_popover_open = false;
             } else if self.selected_node.is_some() {
                 self.selected_node = None;
@@ -828,6 +862,11 @@ impl eframe::App for AxelDesktopApp {
             }
         }
 
+        if let Some(ref props) = self.properties_target {
+            let prop_act = render_properties_modal(&ctx, props);
+            merge_action(&mut pending_action, prop_act);
+        }
+
         self.handle_panel_action(&ctx, pending_action);
         self.maybe_capture_screenshot(&ctx);
 
@@ -866,7 +905,7 @@ fn spawn_background_worker(
 
             let mut config = initial_config;
             let mut index = DocumentIndex::load(&config.index_file);
-            let ai = AiEngine::new(&config);
+            let ai = Arc::new(AiEngine::new(&config));
 
             let emit_snapshot = |cfg: &Config, idx: &DocumentIndex, status: Option<String>| {
                 let items = idx.all().to_vec();
@@ -881,30 +920,47 @@ fn spawn_background_worker(
                 egui_ctx.request_repaint();
             };
 
-            // Emit cached index immediately so UI renders without waiting for scan
-            emit_snapshot(&config, &index, Some("Scanning workspace...".to_string()));
+            // Fast-load extended attributes metadata (xattr) if index is empty
+            if index.count() == 0 && config.input_folder.exists() {
+                if let Ok(entries) = std::fs::read_dir(&config.input_folder) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            if let Some(item) = FileMetadataTag::read_from_file(&path) {
+                                index.upsert(item);
+                            }
+                        }
+                    }
+                }
+            }
 
-            // Initial non-forced scan of workspace folder
+            // Emit cached/xattr index immediately so UI renders in <1ms without waiting for scan
+            let initial_count = index.count();
+            let initial_msg = if initial_count > 0 {
+                Some(format!("{initial_count} document(s) loaded"))
+            } else {
+                Some("Ready".to_string())
+            };
+            emit_snapshot(&config, &index, initial_msg);
+
+            // Channel for background delta scan completions
+            let (scan_result_tx, mut scan_result_rx) =
+                tokio_mpsc::unbounded_channel::<(PathBuf, ScanSummary, Vec<IndexItem>)>();
+
+            let mut active_scan: Option<tokio::task::JoinHandle<()>> = None;
+
+            // Spawn initial delta scan in the background without blocking the loop
             if config.input_folder.exists() {
+                let scan_tx = scan_result_tx.clone();
+                let ai_clone = Arc::clone(&ai);
+                let folder = config.input_folder.clone();
                 let existing_hashes: HashSet<String> =
                     index.all().iter().map(|i| i.hash.clone()).collect();
-                let (summary, new_items) =
-                    scan_folder_into_items(&config.input_folder, &existing_hashes, &ai, false)
-                        .await;
-                if !new_items.is_empty() {
-                    for item in new_items {
-                        index.upsert(item);
-                    }
-                    let _ = index.save();
-                }
-                let status = if summary.indexed > 0 {
-                    Some(format!("Indexed {} new document(s)", summary.indexed))
-                } else {
-                    None
-                };
-                emit_snapshot(&config, &index, status);
-            } else {
-                emit_snapshot(&config, &index, None);
+                active_scan = Some(tokio::spawn(async move {
+                    let (summary, new_items) =
+                        scan_folder_into_items(&folder, &existing_hashes, &ai_clone, false).await;
+                    let _ = scan_tx.send((folder, summary, new_items));
+                }));
             }
 
             let mut watcher = FolderWatcher::new(&config.input_folder).ok();
@@ -925,29 +981,24 @@ fn spawn_background_worker(
                                 })));
                                 egui_ctx.request_repaint();
 
-                                let existing_hashes: HashSet<String> =
-                                    index.all().iter().map(|i| i.hash.clone()).collect();
-                                let (summary, new_items) = scan_folder_into_items(
-                                    &config.input_folder,
-                                    &existing_hashes,
-                                    &ai,
-                                    force,
-                                )
-                                .await;
+                                // Abort any in-flight scan
+                                if let Some(handle) = active_scan.take() {
+                                    handle.abort();
+                                }
 
-                                for item in new_items {
-                                    index.upsert(item);
-                                }
-                                if let Err(e) = index.save() {
-                                    let _ = evt_tx.send(WorkerEvent::Error(format!("Failed to save index: {e}")));
+                                let scan_tx = scan_result_tx.clone();
+                                let ai_clone = Arc::clone(&ai);
+                                let folder = config.input_folder.clone();
+                                let existing_hashes: HashSet<String> = if force {
+                                    HashSet::new()
                                 } else {
-                                    let msg = if summary.indexed > 0 {
-                                        Some(format!("Indexed {} document(s)", summary.indexed))
-                                    } else {
-                                        Some("Workspace up to date".to_string())
-                                    };
-                                    emit_snapshot(&config, &index, msg);
-                                }
+                                    index.all().iter().map(|i| i.hash.clone()).collect()
+                                };
+                                active_scan = Some(tokio::spawn(async move {
+                                    let (summary, new_items) =
+                                        scan_folder_into_items(&folder, &existing_hashes, &ai_clone, force).await;
+                                    let _ = scan_tx.send((folder, summary, new_items));
+                                }));
                             }
                             WorkerCommand::IngestFiles(paths) => {
                                 let _ = evt_tx.send(WorkerEvent::Busy(Some(format!(
@@ -979,6 +1030,11 @@ fn spawn_background_worker(
                                 }
                             }
                             WorkerCommand::SwitchWorkspace(new_dir) => {
+                                // 1. Abort any running scan immediately
+                                if let Some(handle) = active_scan.take() {
+                                    handle.abort();
+                                }
+
                                 config.input_folder = new_dir.clone();
                                 config.index_file = crate::config::workspace_index_path(
                                     &new_dir,
@@ -986,38 +1042,45 @@ fn spawn_background_worker(
                                     &default_index_file,
                                 );
 
-                                // Phase 1: Immediate cache snapshot emission (<1ms)
+                                // 2. Phase 1: Load index and fast-load file metadata (xattr) in <1ms
                                 index = DocumentIndex::load(&config.index_file);
+                                if new_dir.exists() {
+                                    let known_paths: HashSet<String> =
+                                        index.all().iter().map(|i| i.path.clone()).collect();
+                                    if let Ok(entries) = std::fs::read_dir(&new_dir) {
+                                        for entry in entries.flatten() {
+                                            let path = entry.path();
+                                            if path.is_file() && !known_paths.contains(&path.to_string_lossy().to_string()) {
+                                                if let Some(item) = FileMetadataTag::read_from_file(&path) {
+                                                    index.upsert(item);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 watcher = FolderWatcher::new(&config.input_folder).ok();
 
                                 let cached_count = index.count();
                                 let initial_msg = if cached_count > 0 {
-                                    Some(format!("Loaded {} cached item(s)", cached_count))
+                                    Some(format!("{cached_count} document(s) ready"))
                                 } else {
-                                    Some(format!("Scanning {}...", new_dir.display()))
+                                    Some(format!("Watching {}", new_dir.display()))
                                 };
                                 emit_snapshot(&config, &index, initial_msg);
 
-                                // Phase 2: Asynchronous background delta scan
-                                let existing_hashes: HashSet<String> =
-                                    index.all().iter().map(|i| i.hash.clone()).collect();
-                                let (summary, new_items) = scan_folder_into_items(
-                                    &config.input_folder,
-                                    &existing_hashes,
-                                    &ai,
-                                    false,
-                                )
-                                .await;
-                                if !new_items.is_empty() {
-                                    for item in new_items {
-                                        index.upsert(item);
-                                    }
-                                    let _ = index.save();
-                                    let msg = Some(format!("Indexed {} new document(s)", summary.indexed));
-                                    emit_snapshot(&config, &index, msg);
-                                } else {
-                                    let _ = evt_tx.send(WorkerEvent::Busy(None));
-                                    egui_ctx.request_repaint();
+                                // 3. Phase 2: Spawn asynchronous background delta scan without blocking loop
+                                if config.input_folder.exists() {
+                                    let scan_tx = scan_result_tx.clone();
+                                    let ai_clone = Arc::clone(&ai);
+                                    let folder = config.input_folder.clone();
+                                    let existing_hashes: HashSet<String> =
+                                        index.all().iter().map(|i| i.hash.clone()).collect();
+                                    active_scan = Some(tokio::spawn(async move {
+                                        let (summary, new_items) =
+                                            scan_folder_into_items(&folder, &existing_hashes, &ai_clone, false).await;
+                                        let _ = scan_tx.send((folder, summary, new_items));
+                                    }));
                                 }
                             }
                             WorkerCommand::LoadDetail(hash) => {
@@ -1199,6 +1262,47 @@ fn spawn_background_worker(
                                         Some("No redundant duplicates found to trash".to_string()),
                                     );
                                 }
+                            }
+                            WorkerCommand::TrashFile(path_str) => {
+                                let p = Path::new(&path_str);
+                                match crate::engine::trash_file_safely(p) {
+                                    Ok(_) => {
+                                        if let Some(item) = index.find_by_path(&path_str).cloned() {
+                                            let _ = delete_document_from_index(&item.hash, false, &config, &mut index);
+                                        }
+                                        let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+                                        emit_snapshot(
+                                            &config,
+                                            &index,
+                                            Some(format!("Moved {fname} to OS trash")),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        let _ = evt_tx.send(WorkerEvent::Error(e));
+                                        egui_ctx.request_repaint();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some((scanned_folder, summary, new_items)) = scan_result_rx.recv() => {
+                        if scanned_folder == config.input_folder {
+                            let mut changed = false;
+                            for item in new_items {
+                                index.upsert(item);
+                                changed = true;
+                            }
+                            if changed {
+                                let _ = index.save();
+                                let msg = if summary.indexed > 0 {
+                                    Some(format!("Indexed {} document(s)", summary.indexed))
+                                } else {
+                                    None
+                                };
+                                emit_snapshot(&config, &index, msg);
+                            } else {
+                                let _ = evt_tx.send(WorkerEvent::Busy(None));
+                                egui_ctx.request_repaint();
                             }
                         }
                     }
