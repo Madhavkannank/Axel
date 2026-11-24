@@ -79,7 +79,7 @@ impl GroqClient {
 
         let prompt = format!(
             "You are AXEL's semantic file intelligence engine. Analyze the following document text and metadata to determine:\n\
-            1. Constellation category: If it's an episodic web series or television video, output the Series Name (e.g. \"Dark\"). If it's course/study material, notes, or syllabus, output the Subject Name (e.g. \"Data Science\", \"Operating Systems\"). Otherwise, output the specific domain topic (e.g. \"Finance\", \"Legal\", \"Code\", etc.). NEVER output generic tags like \"General\" or \"Video\".\n\
+            1. Constellation category: If it's an episodic web series or television video, output the Series Name (e.g. \"Dark\"). If it's course/study material, notes, or syllabus, output the Subject Name (e.g. \"Data Science\", \"Operating Systems\"). If it's a resume or CV, output \"Career/CV\" or \"Career/Resume\". Otherwise, output the specific domain topic (e.g. \"Finance\", \"Legal\", \"Code\", etc.). NEVER output generic tags like \"General\", \"Video\", or \"unrecognized_text\".\n\
             2. Up to 5 descriptive semantic keywords (exclude common dialogue words or stop words)\n\
             3. Dynamic virtual folder hierarchy paths where this file logically belongs. A single file can appear in multiple virtual folder paths simultaneously without duplicating bytes (for example: a series episode belongs to \"Dark/Dark S03E01.mkv\" and \"Series/Dark/Dark S03E01.mkv\"; a study notes document belongs to \"Data Science/Syllabus.pdf\" and \"Academics/Data Science/Syllabus.pdf\").\n\
             {}\n\

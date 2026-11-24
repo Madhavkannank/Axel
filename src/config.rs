@@ -44,7 +44,7 @@ impl Config {
             .filter(|s| !s.is_empty() && s != "your-groq-api-key-here");
 
         let model_name = std::env::var("MODEL_NAME")
-            .unwrap_or_else(|_| "llama-3.3-70b-versatile".to_string());
+            .unwrap_or_else(|_| "qwen/qwen3.8-27b".to_string());
 
         let model_fallbacks = std::env::var("AXEL_GROQ_FALLBACK_MODELS")
             .map(|val| {
@@ -55,9 +55,9 @@ impl Config {
             })
             .unwrap_or_else(|_| {
                 vec![
-                    "llama-3.1-8b-instant".to_string(),
-                    "mixtral-8x7b-32768".to_string(),
-                    "gemma2-9b-it".to_string(),
+                    "openai/gpt-oss-120b".to_string(),
+                    "openai/gpt-oss-20b".to_string(),
+                    "llama-3.3-70b-versatile".to_string(),
                 ]
             });
 

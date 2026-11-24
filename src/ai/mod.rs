@@ -95,8 +95,13 @@ impl AiEngine {
                     }
 
                     // Refine with dynamic subject name for course/study materials
-                    let lower_name = file_name.to_lowercase();
-                    let is_study = crate::classifier::DOC_DESCRIPTOR_WORDS.iter().any(|&d| lower_name.contains(d));
+                    let is_doc = crate::classifier::filter::is_doc_extension(&clean_ext);
+                    let file_tokens = crate::classifier::tokenize(file_name);
+                    let is_study = is_doc && file_tokens.iter().any(|tok| {
+                        let s = crate::classifier::stem(tok);
+                        crate::classifier::DOC_DESCRIPTOR_WORDS.contains(&tok.as_str())
+                            || crate::classifier::DOC_DESCRIPTOR_WORDS.contains(&s.as_str())
+                    });
                     if is_study {
                         let (dyn_cat, _dyn_vpaths) = crate::classifier::DynamicSemanticClassifier::classify(
                             &sanitized_text,
@@ -112,11 +117,35 @@ impl AiEngine {
                         }
                     }
 
-                    // Fallback if LLM returned generic "General", "Video", or "Media"
-                    if llm_res.category.eq_ignore_ascii_case("general")
+                    // Refine with dynamic career category for resumes and CVs
+                    let is_resume_or_cv = file_tokens.iter().any(|t| t == "cv" || t == "resume" || t == "vitae")
+                        || candidate_kws.iter().any(|k| k == "cv" || k == "resume" || k == "curriculum vitae");
+                    if is_resume_or_cv {
+                        let sub = if file_tokens.iter().any(|t| t == "cv" || t == "vitae") { "CV" } else { "Resume" };
+                        let career_cat = format!("Career/{sub}");
+                        let prior_cat = std::mem::replace(&mut llm_res.category, career_cat.clone());
+                        if !prior_cat.is_empty() && prior_cat != career_cat && !prior_cat.starts_with("Documents/") && !prior_cat.starts_with("Media/") {
+                            let skill_vpath = format!("{prior_cat}/{file_name}");
+                            if !llm_res.virtual_paths.contains(&skill_vpath) {
+                                llm_res.virtual_paths.push(skill_vpath);
+                            }
+                        }
+                        let career_vpath = format!("{career_cat}/{file_name}");
+                        if !llm_res.virtual_paths.contains(&career_vpath) {
+                            llm_res.virtual_paths.insert(0, career_vpath);
+                        }
+                    }
+
+                    // Fallback if LLM returned generic "General", "Video", "Media", or unrecognized noise
+                    let is_generic_or_invalid = llm_res.category.eq_ignore_ascii_case("general")
                         || llm_res.category.eq_ignore_ascii_case("video")
                         || llm_res.category.eq_ignore_ascii_case("media")
-                    {
+                        || llm_res.category.eq_ignore_ascii_case("unrecognized_text")
+                        || llm_res.category.eq_ignore_ascii_case("unknown")
+                        || llm_res.category.eq_ignore_ascii_case("unrecognized")
+                        || llm_res.category.eq_ignore_ascii_case("none");
+
+                    if is_generic_or_invalid {
                         let (dyn_cat, dyn_vpaths) = crate::classifier::DynamicSemanticClassifier::classify(
                             &sanitized_text,
                             file_name,

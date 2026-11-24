@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
+use crate::classifier::nlp::{is_lexically_valid, is_recognized_acronym, is_stopword, tokenize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorpusVocabulary {
@@ -19,64 +20,12 @@ impl Default for CorpusVocabulary {
 
 pub struct TfidfEngine {
     vocab: CorpusVocabulary,
-    stopwords: HashSet<&'static str>,
-    short_acronym_allowlist: HashSet<&'static str>,
     storage_path: Option<PathBuf>,
     dirty: bool,
 }
 
 impl TfidfEngine {
     pub fn new(storage_path: Option<PathBuf>) -> Self {
-        let stopwords = [
-            // English Grammar, Articles & Prepositions
-            "the", "and", "this", "that", "with", "from", "for", "have", "been", "they",
-            "will", "would", "there", "their", "what", "about", "which", "when", "make",
-            "like", "time", "just", "know", "take", "people", "into", "year", "your",
-            "good", "some", "could", "them", "other", "than", "then", "now", "look",
-            "only", "come", "its", "over", "think", "also", "back", "after", "use",
-            "two", "how", "our", "work", "first", "well", "way", "even", "new", "want",
-            "because", "any", "these", "give", "day", "most", "us", "are", "were", "was",
-            "has", "had", "can", "may", "page", "total", "date", "document", "file",
-            "using", "used", "present", "same", "before", "getting", "based", "each",
-            "such", "more", "very", "here", "where", "while", "should", "must", "shall",
-            "between", "through", "under", "above", "below", "within", "without", "both",
-            "again", "further", "once", "down", "during", "behind", "around", "among",
-            "since", "still", "until", "upon", "therefore", "across", "along", "already",
-            // Pronouns & Possessives
-            "you", "your", "yours", "yourself", "yourselves", "he", "him", "his", "himself",
-            "she", "her", "hers", "herself", "they", "them", "their", "theirs", "we", "us",
-            "our", "ours", "who", "whom", "whose", "which", "what", "someone", "something",
-            // Conversational & Contraction noise
-            "don", "doesn", "didn", "hasn", "haven", "hadn", "won", "wouldn", "shan",
-            "shouldn", "cannot", "couldn", "mustn", "needn", "ain", "aren", "isn",
-            "wasn", "weren", "gonna", "wanna", "gotta", "yeah", "yep", "nope", "okay",
-            "alright", "sure", "maybe", "please", "thank", "thanks", "hello", "hey",
-            "listen", "tell", "told", "talk", "came", "went", "gone", "seem", "thing",
-            "things", "stuff", "guy", "guys", "man", "woman", "boy", "girl", "sir",
-            // German stopwords
-            "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "eines",
-            "einem", "einen", "und", "oder", "aber", "mit", "von", "zu", "im", "in",
-            "am", "an", "auf", "aus", "bei", "nach", "uber", "über", "unter", "vor",
-            "zwischen", "ich", "du", "er", "sie", "es", "wir", "ihr", "mich", "dich",
-            "ihn", "uns", "euch", "ihnen", "sein", "seine", "nicht", "auch", "so",
-            "wie", "wenn", "dass", "da", "hier", "dort", "ja", "nein", "doch", "noch",
-            "schon", "nur", "immer", "wieder", "sehr", "etwas", "nichts", "alles",
-            // Extensions & code noise
-            "txt", "pdf", "docx", "png", "jpg", "jpeg", "webp", "md", "json", "csv",
-            "self", "true", "false", "none", "null", "return", "import", "class", "def",
-        ]
-        .into_iter()
-        .collect();
-
-        let short_acronym_allowlist = [
-            "pdf", "doc", "sql", "api", "git", "csv", "jpg", "png", "svg", "xml",
-            "app", "bot", "vtt", "srt", "cpu", "gpu", "ram", "rom", "ssh", "cli",
-            "sdk", "zip", "tar", "log", "css", "vue", "npm", "pip", "url", "uri",
-            "dns", "ssl", "tls", "key", "web", "net", "ai", "ml", "dev", "ops",
-        ]
-        .into_iter()
-        .collect();
-
         let vocab = if let Some(ref path) = storage_path {
             Self::load_vocab(path).unwrap_or_default()
         } else {
@@ -85,8 +34,6 @@ impl TfidfEngine {
 
         Self {
             vocab,
-            stopwords,
-            short_acronym_allowlist,
             storage_path,
             dirty: false,
         }
@@ -157,9 +104,9 @@ impl TfidfEngine {
                 let tf = 1.0 + (count as f64).ln();
                 let tf_norm = tf / (1.0 + total_words_f.ln());
 
-                // Smooth IDF: ln(1 + N / (1 + df)) + 1.0
+                // Smooth Okapi BM25 / Lucene IDF: ln(1 + (N - df + 0.5) / (df + 0.5)) + 1.0
                 let df = self.vocab.doc_frequencies.get(&term).copied().unwrap_or(1) as f64;
-                let idf = ((1.0 + n_docs) / (1.0 + df)).ln() + 1.0;
+                let idf = ((1.0 + (n_docs - df + 0.5).max(0.0)) / (df + 0.5)).ln().max(0.0) + 1.0;
 
                 let mut score = tf_norm * idf;
 
@@ -168,7 +115,7 @@ impl TfidfEngine {
                     score *= 1.45;
                 }
 
-                // Favor medium-length distinctive words (len 5-14)
+                // Favor medium-length distinctive words (len 5-16)
                 if term.len() >= 5 && term.len() <= 16 {
                     score *= 1.15;
                 }
@@ -208,24 +155,23 @@ impl TfidfEngine {
     ) -> HashMap<String, usize> {
         let mut counts = HashMap::new();
 
-        // 1. Candidate terms from text
-        for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
-            let clean = word.trim_matches('_').to_lowercase();
+        // 1. Candidate terms from tokenized text
+        for clean in tokenize(text) {
             let len = clean.chars().count();
-            let is_acronym = self.short_acronym_allowlist.contains(clean.as_str());
+            let is_acronym = is_recognized_acronym(&clean);
 
-            if (len >= 4 && len <= 32) || (len == 3 && is_acronym) {
-                let alpha_count = clean.chars().filter(|c| c.is_alphabetic()).count();
-                if alpha_count >= 2 && !self.stopwords.contains(clean.as_str()) {
-                    *counts.entry(clean).or_insert(0) += 1;
-                }
+            if ((len >= 4 && len <= 32) || (len == 3 && is_acronym))
+                && !is_stopword(&clean)
+                && is_lexically_valid(&clean)
+            {
+                *counts.entry(clean).or_insert(0) += 1;
             }
         }
 
         // 2. Extra weight for explicit code symbols and functions
         for sym in extra_symbols {
             let lower = sym.to_lowercase();
-            if lower.len() >= 2 && !self.stopwords.contains(lower.as_str()) {
+            if lower.len() >= 2 && !is_stopword(&lower) && is_lexically_valid(&lower) {
                 *counts.entry(lower).or_insert(0) += 3;
             }
         }

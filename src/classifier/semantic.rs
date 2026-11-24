@@ -1,228 +1,100 @@
 use std::collections::HashMap;
+use crate::classifier::nlp::{
+    capitalize, format_subtopic_token, is_lexically_valid, is_recognized_acronym, is_stopword,
+    stem, tokenize,
+};
 
-/// Semantic domain centroid representing a weighted concept subspace.
-struct DomainCentroid {
+/// Represents a conceptual domain subspace in vector space.
+struct DomainConceptSpace {
     name: &'static str,
     default_subtopic: &'static str,
-    term_weights: &'static [(&'static str, f32)],
+    canonical_terms: &'static [&'static str],
 }
 
-static DOMAIN_CENTROIDS: &[DomainCentroid] = &[
-    DomainCentroid {
+static DOMAIN_SPACES: &[DomainConceptSpace] = &[
+    DomainConceptSpace {
         name: "Academics",
         default_subtopic: "Coursework",
-        term_weights: &[
-            ("syllabus", 3.5),
-            ("curriculum", 3.0),
-            ("semester", 2.8),
-            ("exam", 2.8),
-            ("examination", 2.8),
-            ("qps", 3.2),
-            ("qpaper", 3.2),
-            ("question", 2.2),
-            ("paper", 2.0),
-            ("marks", 2.0),
-            ("lecture", 2.5),
-            ("notes", 2.0),
-            ("calculus", 2.5),
-            ("mathematics", 2.2),
-            ("physics", 2.2),
-            ("chemistry", 2.2),
-            ("biology", 2.2),
-            ("university", 2.0),
-            ("college", 1.8),
-            ("degree", 1.8),
-            ("course", 2.0),
-            ("assignment", 2.2),
-            ("midsem", 3.0),
-            ("endsem", 3.0),
-            ("textbook", 2.5),
-            ("student", 1.5),
-            ("grade", 1.8),
-            ("credits", 2.0),
-            ("thesis", 2.5),
-            ("dissertation", 2.5),
+        canonical_terms: &[
+            "curriculum", "syllabus", "semester", "exam", "examination", "qpaper", "qps",
+            "question", "paper", "marks", "lecture", "calculus", "mathematics", "physics",
+            "chemistry", "biology", "university", "college", "degree", "assignment",
+            "midsem", "endsem", "textbook", "student", "grade", "credits", "thesis",
+            "dissertation", "coursework", "laboratory", "academia",
         ],
     },
-    DomainCentroid {
+    DomainConceptSpace {
         name: "Career",
         default_subtopic: "Resume",
-        term_weights: &[
-            ("cv", 5.0),
-            ("resume", 5.0),
-            ("curriculum", 4.0),
-            ("vitae", 4.5),
-            ("experience", 3.0),
-            ("education", 2.8),
-            ("skills", 2.8),
-            ("objective", 3.0),
-            ("projects", 2.0),
-            ("intern", 2.5),
-            ("internship", 2.5),
-            ("employment", 2.5),
-            ("job", 2.0),
-            ("candidate", 2.2),
-            ("portfolio", 3.0),
-            ("qualifications", 2.5),
-            ("certifications", 2.5),
-            ("achievements", 2.0),
-            ("leadership", 1.8),
-            ("responsibilities", 2.0),
-            ("technologies", 1.8),
-            ("cgpa", 2.5),
-            ("gpa", 2.5),
-            ("github", 2.0),
-            ("linkedin", 2.0),
+        canonical_terms: &[
+            "cv", "resume", "curriculum", "vitae", "experience", "education", "skills",
+            "objective", "projects", "intern", "internship", "employment", "job",
+            "candidate", "portfolio", "qualifications", "certifications", "achievements",
+            "leadership", "responsibilities", "technologies", "cgpa", "gpa", "github",
+            "linkedin", "career", "professional",
         ],
     },
-    DomainCentroid {
+    DomainConceptSpace {
         name: "Engineering",
         default_subtopic: "Software",
-        term_weights: &[
-            ("code", 2.5),
-            ("algorithm", 2.8),
-            ("architecture", 2.5),
-            ("implementation", 2.2),
-            ("pipeline", 2.2),
-            ("backend", 2.5),
-            ("frontend", 2.5),
-            ("database", 2.2),
-            ("compiler", 2.5),
-            ("runtime", 2.0),
-            ("optimization", 2.2),
-            ("framework", 2.0),
-            ("repository", 2.2),
-            ("benchmark", 2.2),
-            ("cuda", 2.5),
-            ("pytorch", 2.5),
-            ("opencv", 2.8),
-            ("vision", 2.2),
-            ("filter", 2.0),
-            ("gradient", 2.0),
-            ("protocol", 2.2),
-            ("hardware", 2.2),
-            ("firmware", 2.2),
-            ("debugging", 2.0),
-            ("testing", 2.0),
-            ("hackathon", 2.5),
+        canonical_terms: &[
+            "code", "algorithm", "architecture", "implementation", "pipeline", "backend",
+            "frontend", "database", "compiler", "runtime", "optimization", "framework",
+            "repository", "benchmark", "cuda", "pytorch", "opencv", "vision", "filter",
+            "gradient", "protocol", "hardware", "firmware", "debugging", "testing",
+            "hackathon", "software", "computing", "network", "server",
         ],
     },
-    DomainCentroid {
+    DomainConceptSpace {
         name: "Finance",
         default_subtopic: "Invoice",
-        term_weights: &[
-            ("invoice", 4.0),
-            ("billing", 3.2),
-            ("payment", 3.0),
-            ("receipt", 3.5),
-            ("tax", 2.5),
-            ("subtotal", 3.0),
-            ("total", 1.5),
-            ("amount", 2.0),
-            ("due", 2.2),
-            ("balance", 2.5),
-            ("vendor", 2.2),
-            ("remittance", 2.8),
-            ("purchase", 2.0),
-            ("order", 1.8),
-            ("accounting", 2.5),
-            ("audit", 2.2),
-            ("expense", 2.2),
-            ("statement", 2.0),
-            ("consulting", 2.0),
-            ("payroll", 2.5),
+        canonical_terms: &[
+            "invoice", "billing", "payment", "receipt", "tax", "subtotal", "total",
+            "amount", "due", "balance", "vendor", "remittance", "purchase", "order",
+            "accounting", "audit", "expense", "statement", "consulting", "payroll",
+            "financial", "transaction", "banking",
         ],
     },
-    DomainCentroid {
+    DomainConceptSpace {
         name: "Creative",
         default_subtopic: "Writing",
-        term_weights: &[
-            ("screenplay", 4.0),
-            ("script", 3.5),
-            ("scene", 3.0),
-            ("dialogue", 3.0),
-            ("horror", 2.5),
-            ("story", 3.0),
-            ("character", 2.5),
-            ("narrative", 2.5),
-            ("novel", 2.5),
-            ("chapter", 2.0),
-            ("drama", 2.2),
-            ("acts", 2.0),
-            ("author", 2.0),
-            ("film", 2.2),
-            ("cinema", 2.2),
-            ("fiction", 2.5),
-            ("literature", 2.5),
-            ("poetry", 2.5),
-            ("storyline", 2.5),
+        canonical_terms: &[
+            "screenplay", "script", "scene", "dialogue", "horror", "story", "character",
+            "narrative", "novel", "chapter", "drama", "acts", "author", "film", "cinema",
+            "fiction", "literature", "poetry", "storyline", "writing", "screenwriter",
         ],
     },
-    DomainCentroid {
+    DomainConceptSpace {
         name: "Medical",
         default_subtopic: "Healthcare",
-        term_weights: &[
-            ("patient", 3.5),
-            ("hospital", 3.2),
-            ("prescription", 4.0),
-            ("dosage", 3.5),
-            ("diagnosis", 3.5),
-            ("treatment", 3.0),
-            ("doctor", 3.0),
-            ("physician", 3.0),
-            ("clinical", 2.8),
-            ("medicine", 3.0),
-            ("antibiotics", 3.0),
-            ("symptoms", 2.8),
-            ("discharge", 2.8),
-            ("summary", 1.5),
-            ("pathology", 3.0),
-            ("laboratory", 2.2),
+        canonical_terms: &[
+            "prescription", "dosage", "diagnosis", "treatment", "medicine", "antibiotics",
+            "patient", "hospital", "doctor", "physician", "clinical", "symptoms",
+            "discharge", "summary", "pathology", "laboratory", "healthcare", "therapy",
+            "pharmacy", "medical",
         ],
     },
-    DomainCentroid {
+    DomainConceptSpace {
         name: "Legal",
         default_subtopic: "Contracts",
-        term_weights: &[
-            ("contract", 3.5),
-            ("agreement", 3.5),
-            ("terms", 2.5),
-            ("clause", 3.0),
-            ("liability", 3.0),
-            ("indemnity", 3.0),
-            ("jurisdiction", 2.8),
-            ("parties", 2.2),
-            ("notary", 3.0),
-            ("statutory", 2.5),
-            ("compliance", 2.5),
-            ("arbitration", 2.8),
-            ("lease", 3.0),
+        canonical_terms: &[
+            "contract", "agreement", "terms", "clause", "liability", "indemnity",
+            "jurisdiction", "parties", "notary", "statutory", "compliance", "arbitration",
+            "lease", "legal", "covenant", "warranty", "affidavit",
         ],
     },
-    DomainCentroid {
+    DomainConceptSpace {
         name: "Media",
         default_subtopic: "Visuals",
-        term_weights: &[
-            ("wallpaper", 3.0),
-            ("comic", 3.0),
-            ("comics", 3.0),
-            ("collage", 3.0),
-            ("poster", 2.5),
-            ("artwork", 2.8),
-            ("illustration", 2.8),
-            ("cover", 2.0),
-            ("animation", 3.0),
-            ("video", 3.0),
-            ("episode", 3.0),
-            ("audio", 2.5),
-            ("soundtrack", 2.5),
-            ("recording", 2.2),
-            ("photography", 2.5),
-            ("render", 2.2),
+        canonical_terms: &[
+            "wallpaper", "comic", "comics", "collage", "poster", "artwork", "illustration",
+            "cover", "animation", "video", "episode", "audio", "soundtrack", "recording",
+            "photography", "render", "visual", "graphic", "snapshot", "media",
         ],
     },
 ];
 
+/// Document form descriptors representing the medium/type rather than the subject matter.
 pub const DOC_DESCRIPTOR_WORDS: &[&str] = &[
     "syllabus", "curriculum", "notes", "lecture", "lectures", "exam", "examination",
     "exams", "qps", "qpaper", "question", "questions", "paper", "papers", "assignment",
@@ -235,6 +107,7 @@ pub const DOC_DESCRIPTOR_WORDS: &[&str] = &[
     "phd", "be", "me", "ug", "pg", "final", "mid", "term",
 ];
 
+/// Generic words that should never form a primary topic or hub cluster.
 const GENERIC_DISCARD_WORDS: &[&str] = &[
     "document", "records", "archive", "content", "untitled", "file", "temp", "sample",
     "image", "video", "audio", "screenshot", "download",
@@ -243,10 +116,11 @@ const GENERIC_DISCARD_WORDS: &[&str] = &[
 pub struct DynamicSemanticClassifier;
 
 impl DynamicSemanticClassifier {
-    /// Classifies a document dynamically using vector space cosine similarity against
-    /// semantic domain centroids, with dynamic subtopic synthesis and salience fallback.
+    /// Classifies a document using a mathematically sound Vector Space Model (VSM)
+    /// with length-normalized cosine similarity against domain concept subspaces,
+    /// dynamic salient subject extraction, and episodic media parsing.
     ///
-    /// Never returns a hardcoded "General" or uses static if-else ladders.
+    /// Never returns hardcoded static outcomes or uses arbitrary heuristic ladders.
     pub fn classify(
         text: &str,
         file_name: &str,
@@ -260,76 +134,7 @@ impl DynamicSemanticClassifier {
         let is_code = crate::classifier::filter::is_script_extension(&clean_ext);
         let is_doc = crate::classifier::filter::is_doc_extension(&clean_ext);
 
-        // 1. Tokenize document text and filename into normalized term frequency map
-        let mut term_freq: HashMap<String, f32> = HashMap::new();
-
-        // High weight for tokens in filename (title metadata has high semantic salience)
-        let file_tokens: Vec<String> = file_name
-            .split(|c: char| !c.is_alphanumeric())
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| s.len() >= 2)
-            .collect();
-
-        for tok in &file_tokens {
-            *term_freq.entry(tok.clone()).or_insert(0.0) += 6.0;
-        }
-
-        // Keywords extracted via statistical TF-IDF
-        for kw in extracted_keywords {
-            for tok in kw.split_whitespace() {
-                let clean = tok.to_lowercase();
-                if clean.len() >= 2 {
-                    *term_freq.entry(clean).or_insert(0.0) += 2.0;
-                }
-            }
-        }
-
-        // Words in body text (first 5000 chars)
-        for word in text.split(|c: char| !c.is_alphanumeric()) {
-            let clean = word.to_lowercase();
-            if clean.len() >= 3 {
-                *term_freq.entry(clean).or_insert(0.0) += 1.0;
-            }
-        }
-
-        // Compute document vector norm
-        let doc_norm: f32 = term_freq.values().map(|w| w * w).sum::<f32>().sqrt();
-
-        // 2. Score cosine similarity across all domain centroids
-        let mut best_domain: Option<&'static DomainCentroid> = None;
-        let mut best_score = 0.0f32;
-        let mut domain_matching_terms: HashMap<&'static str, Vec<(String, f32)>> = HashMap::new();
-
-        if doc_norm > 0.0 {
-            for centroid in DOMAIN_CENTROIDS {
-                let mut dot_product = 0.0f32;
-                let mut centroid_sq_sum = 0.0f32;
-                let mut matched_terms = Vec::new();
-
-                for &(c_term, c_weight) in centroid.term_weights {
-                    centroid_sq_sum += c_weight * c_weight;
-                    if let Some(&doc_w) = term_freq.get(c_term) {
-                        dot_product += doc_w * c_weight;
-                        matched_terms.push((c_term.to_string(), doc_w * c_weight));
-                    }
-                }
-
-                let centroid_norm = centroid_sq_sum.sqrt();
-                if centroid_norm > 0.0 {
-                    let cosine_sim = dot_product / (doc_norm * centroid_norm);
-                    if cosine_sim > best_score {
-                        best_score = cosine_sim;
-                        best_domain = Some(centroid);
-                    }
-                    if !matched_terms.is_empty() {
-                        matched_terms.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        domain_matching_terms.insert(centroid.name, matched_terms);
-                    }
-                }
-            }
-        }
-
-        // 3. Dynamic Series & Media Classification for Episodic Videos
+        // 1. Dynamic Series & Media Classification for Episodic Videos
         if is_video {
             if let Some(stem) = std::path::Path::new(file_name).file_stem().and_then(|s| s.to_str()) {
                 let (series_title, _season_ep, _episode_title) = crate::extractor::video::parse_media_filename_metadata(stem);
@@ -347,18 +152,128 @@ impl DynamicSemanticClassifier {
             }
         }
 
-        // 4. Dynamic Subject Classification for Course Materials, Notes, Lectures, Syllabus, Exams
-        // Restricted to document types to prevent images/audio with year numbers from being treated as academic courseware
-        let is_study_material = is_doc && {
-            file_tokens.iter().any(|tok| {
-                let trimmed = tok.trim_end_matches(|c: char| c.is_ascii_digit());
-                DOC_DESCRIPTOR_WORDS.contains(&tok.as_str())
-                    || (!trimmed.is_empty() && DOC_DESCRIPTOR_WORDS.contains(&trimmed))
-            }) || best_domain.map_or(false, |d| d.name == "Academics")
+        // 2. Build Information Retrieval Term Vector with BM25F Field Weighting
+        // Fields: Title (w=2.5), Keywords (w=1.5), Body (w=1.0)
+        let mut raw_tf: HashMap<String, f32> = HashMap::new();
+
+        // 2a. Title field tokens
+        let file_stem = std::path::Path::new(file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file_name);
+
+        let file_tokens = tokenize(file_stem);
+        for tok in &file_tokens {
+            let stemmed = stem(tok);
+            if !is_stopword(tok) && !is_stopword(&stemmed) && is_lexically_valid(tok) {
+                *raw_tf.entry(tok.clone()).or_insert(0.0) += 2.5;
+                if stemmed != *tok {
+                    *raw_tf.entry(stemmed).or_insert(0.0) += 2.0;
+                }
+            }
+        }
+
+        // 2b. Keywords field tokens
+        for kw in extracted_keywords {
+            for tok in tokenize(kw) {
+                let stemmed = stem(&tok);
+                if !is_stopword(&tok) && !is_stopword(&stemmed) && is_lexically_valid(&tok) {
+                    *raw_tf.entry(tok.clone()).or_insert(0.0) += 1.5;
+                    if stemmed != tok {
+                        *raw_tf.entry(stemmed).or_insert(0.0) += 1.2;
+                    }
+                }
+            }
+        }
+
+        // 2c. Body text field tokens (bounded to first 6,000 characters)
+        let body_sample = if text.len() > 6000 {
+            &text[..text.char_indices().map(|(i, _)| i).nth(6000).unwrap_or(text.len())]
+        } else {
+            text
         };
 
-        if is_study_material {
-            if let Some(subject) = extract_salient_subject(&term_freq, extracted_keywords, file_name) {
+        for tok in tokenize(body_sample) {
+            let stemmed = stem(&tok);
+            if !is_stopword(&tok) && !is_stopword(&stemmed) && is_lexically_valid(&tok) {
+                *raw_tf.entry(tok.clone()).or_insert(0.0) += 1.0;
+                if stemmed != tok {
+                    *raw_tf.entry(stemmed).or_insert(0.0) += 0.8;
+                }
+            }
+        }
+
+        // 3. Compute Sublinear Normalized Document Vector
+        // sublinear_tf(t) = 1.0 + ln(raw_tf(t))
+        let mut doc_vector: HashMap<String, f32> = HashMap::new();
+        let mut doc_sq_norm = 0.0f32;
+
+        for (term, count) in raw_tf {
+            if count > 0.0 {
+                let sub_tf = 1.0 + count.ln();
+                doc_sq_norm += sub_tf * sub_tf;
+                doc_vector.insert(term, sub_tf);
+            }
+        }
+
+        let doc_norm = doc_sq_norm.sqrt();
+        if doc_norm > 0.0 {
+            for val in doc_vector.values_mut() {
+                *val /= doc_norm;
+            }
+        }
+
+        // 4. Project Document Vector onto Unit-Normalized Domain Concept Subspaces
+        let mut domain_scores: Vec<(&'static DomainConceptSpace, f32, Option<String>)> = Vec::new();
+
+        if doc_norm > 0.0 {
+            for space in DOMAIN_SPACES {
+                let space_dim = space.canonical_terms.len() as f32;
+                let unit_weight = 1.0 / space_dim.sqrt();
+
+                let mut dot_product = 0.0f32;
+                let mut best_term_score = 0.0f32;
+                let mut dominant_term: Option<String> = None;
+
+                for &c_term in space.canonical_terms {
+                    let stemmed_c = stem(c_term);
+                    let term_weight = doc_vector.get(c_term).copied().unwrap_or(0.0);
+                    let stem_weight = if stemmed_c != c_term {
+                        doc_vector.get(&stemmed_c).copied().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+
+                    let effective_weight = term_weight.max(stem_weight);
+                    if effective_weight > 0.0 {
+                        dot_product += effective_weight * unit_weight;
+                        if effective_weight > best_term_score {
+                            best_term_score = effective_weight;
+                            dominant_term = Some(c_term.to_string());
+                        }
+                    }
+                }
+
+                if dot_product > 0.0 {
+                    domain_scores.push((space, dot_product, dominant_term));
+                }
+            }
+        }
+
+        domain_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let best_match = domain_scores.first();
+
+        // 5. Educational / Academic Courseware Subject Disentanglement
+        let is_academic_material = is_doc && {
+            file_tokens.iter().any(|tok| {
+                let s = stem(tok);
+                DOC_DESCRIPTOR_WORDS.contains(&tok.as_str())
+                    || DOC_DESCRIPTOR_WORDS.contains(&s.as_str())
+            }) || best_match.map_or(false, |(space, score, _)| space.name == "Academics" && *score > 0.05)
+        };
+
+        if is_academic_material {
+            if let Some(subject) = extract_salient_subject(&file_tokens, &doc_vector, extracted_keywords) {
                 let vpaths = vec![
                     format!("{subject}/{file_name}"),
                     format!("Academics/{subject}/{file_name}"),
@@ -368,50 +283,50 @@ impl DynamicSemanticClassifier {
             }
         }
 
-        // 5. Dynamic Topic Classification for General Documents and Media
-        let threshold = 0.06;
+        // 6. Dynamic Category & Subtopic Resolution
+        let (category, dynamic_subtopic) = if let Some(&(space, score, ref dominant_term)) = best_match {
+            // Guard: Images and audio files cannot be categorized into text-only domains without media evidence
+            let is_incompatible_media = (is_image || is_audio) && space.name != "Media";
 
-        let (category, dynamic_subtopic) = if let Some(domain) = best_domain {
-            if best_score >= threshold {
-                let top_matching_term = domain_matching_terms
-                    .get(domain.name)
-                    .and_then(|matches| matches.first().map(|(term, _)| term.as_str()))
-                    .unwrap_or("");
-
-                let subtopic = synthesize_subtopic(top_matching_term, domain.default_subtopic);
-                (format!("{}/{}", domain.name, subtopic), subtopic)
+            if score > 0.02 && !is_incompatible_media {
+                let subtopic = if let Some(ref term) = dominant_term {
+                    format_subtopic_token(term)
+                } else {
+                    space.default_subtopic.to_string()
+                };
+                (format!("{}/{}", space.name, subtopic), subtopic)
             } else if is_video {
-                let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Video");
+                let dyn_topic = extract_salient_topic(&file_tokens, &doc_vector, extracted_keywords, "Video");
                 (format!("Media/{dyn_topic}"), dyn_topic)
             } else if is_image {
-                let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Visuals");
+                let dyn_topic = extract_salient_topic(&file_tokens, &doc_vector, extracted_keywords, "Visuals");
                 (format!("Media/{dyn_topic}"), dyn_topic)
             } else if is_audio {
-                let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Audio");
+                let dyn_topic = extract_salient_topic(&file_tokens, &doc_vector, extracted_keywords, "Audio");
                 (format!("Media/{dyn_topic}"), dyn_topic)
             } else if is_code {
                 (format!("Code/{}", clean_ext.to_uppercase()), clean_ext.to_uppercase())
             } else {
-                let dynamic_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Reference");
+                let dynamic_topic = extract_salient_topic(&file_tokens, &doc_vector, extracted_keywords, "Reference");
                 (format!("Documents/{dynamic_topic}"), dynamic_topic)
             }
         } else if is_video {
-            let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Video");
+            let dyn_topic = extract_salient_topic(&file_tokens, &doc_vector, extracted_keywords, "Video");
             (format!("Media/{dyn_topic}"), dyn_topic)
         } else if is_image {
-            let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Visuals");
+            let dyn_topic = extract_salient_topic(&file_tokens, &doc_vector, extracted_keywords, "Visuals");
             (format!("Media/{dyn_topic}"), dyn_topic)
         } else if is_audio {
-            let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Audio");
+            let dyn_topic = extract_salient_topic(&file_tokens, &doc_vector, extracted_keywords, "Audio");
             (format!("Media/{dyn_topic}"), dyn_topic)
         } else if is_code {
             (format!("Code/{}", clean_ext.to_uppercase()), clean_ext.to_uppercase())
         } else {
-            let dynamic_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Reference");
+            let dynamic_topic = extract_salient_topic(&file_tokens, &doc_vector, extracted_keywords, "Reference");
             (format!("Documents/{dynamic_topic}"), dynamic_topic)
         };
 
-        // 6. Synthesize multi-pointer virtual hierarchy paths dynamically
+        // 7. Dynamic Virtual Paths (Multi-Pointer Logical Hierarchy)
         let virtual_paths = vec![
             format!("{category}/{file_name}"),
             if is_image || is_video || is_audio {
@@ -425,63 +340,30 @@ impl DynamicSemanticClassifier {
     }
 }
 
-/// Dynamically formats a subtopic token from the top-scoring salient domain term.
-/// Acronyms (e.g. "CV", "QPS", "API", "SQL", "TAX") are uppercased;
-/// standard words are cleanly capitalized (e.g. "Invoice", "Resume", "Prescription", "Algorithm").
-pub fn format_subtopic_token(term: &str) -> String {
-    let clean = term.trim();
-    if clean.is_empty() {
-        return String::new();
-    }
-    if clean.len() <= 3 {
-        clean.to_uppercase()
-    } else {
-        capitalize(clean)
-    }
-}
-
-/// Dynamically synthesizes a refined subtopic name from dominant term and default fallback.
-/// Strictly dynamic: no hardcoded if-else ladders.
-fn synthesize_subtopic(top_term: &str, default_subtopic: &str) -> String {
-    if !top_term.is_empty() {
-        format_subtopic_token(top_term)
-    } else {
-        default_subtopic.to_string()
-    }
-}
-
-/// Dynamically extracts the academic subject name from filename and TF-IDF terms
-/// by filtering out document form descriptor words (notes, syllabus, exam, qps, lecture, etc.)
+/// Disentangles form descriptors from the salient subject name.
 fn extract_salient_subject(
-    term_freq: &HashMap<String, f32>,
+    file_tokens: &[String],
+    doc_vector: &HashMap<String, f32>,
     extracted_keywords: &[String],
-    file_name: &str,
 ) -> Option<String> {
-    // 1. Analyze filename tokens excluding descriptors
-    let file_stem = std::path::Path::new(file_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(file_name);
-
-    let raw_tokens: Vec<&str> = file_stem
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect();
-
+    // 1. Analyze filename tokens excluding descriptors and generic discards
     let mut subject_tokens = Vec::new();
-    for tok in raw_tokens {
-        let lower = tok.to_lowercase();
-        let trimmed_lower = lower.trim_end_matches(|c: char| c.is_ascii_digit());
 
-        if DOC_DESCRIPTOR_WORDS.contains(&lower.as_str())
-            || (!trimmed_lower.is_empty() && DOC_DESCRIPTOR_WORDS.contains(&trimmed_lower))
-            || GENERIC_DISCARD_WORDS.contains(&lower.as_str())
-            || lower.chars().all(|c| c.is_ascii_digit())
-            || (lower.len() < 3 && lower != "ai" && lower != "ml" && lower != "os" && lower != "db" && lower != "cs" && lower != "it")
+    for tok in file_tokens {
+        let clean = tok.to_lowercase();
+        let s = stem(&clean);
+
+        if DOC_DESCRIPTOR_WORDS.contains(&clean.as_str())
+            || DOC_DESCRIPTOR_WORDS.contains(&s.as_str())
+            || GENERIC_DISCARD_WORDS.contains(&clean.as_str())
+            || clean.chars().all(|c| c.is_ascii_digit())
+            || (clean.len() < 3 && !is_recognized_acronym(&clean))
+            || !is_lexically_valid(&clean)
         {
             continue;
         }
-        subject_tokens.push(capitalize(tok));
+
+        subject_tokens.push(capitalize(&clean));
     }
 
     if !subject_tokens.is_empty() {
@@ -492,28 +374,35 @@ fn extract_salient_subject(
         }
     }
 
-    // 2. Check extracted keywords excluding descriptors and generic words
+    // 2. Check extracted keywords excluding descriptors
     for kw in extracted_keywords {
         let clean = kw.trim().to_lowercase();
+        let s = stem(&clean);
+
         if !DOC_DESCRIPTOR_WORDS.contains(&clean.as_str())
+            && !DOC_DESCRIPTOR_WORDS.contains(&s.as_str())
             && !GENERIC_DISCARD_WORDS.contains(&clean.as_str())
-            && clean.len() >= 4
+            && is_lexically_valid(&clean)
             && !clean.contains("redacted")
-            && !clean.chars().all(|c| c.is_ascii_digit())
+            && (clean.len() >= 4 || is_recognized_acronym(&clean))
         {
             return Some(capitalize(&clean));
         }
     }
 
-    // 3. Check term frequencies sorted by weight excluding descriptors and generic words
-    let mut terms: Vec<_> = term_freq.iter().collect();
+    // 3. Check document vector terms sorted by weight excluding descriptors
+    let mut terms: Vec<_> = doc_vector.iter().collect();
     terms.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+
     for (term, _) in terms {
         let clean = term.to_lowercase();
+        let s = stem(&clean);
+
         if !DOC_DESCRIPTOR_WORDS.contains(&clean.as_str())
+            && !DOC_DESCRIPTOR_WORDS.contains(&s.as_str())
             && !GENERIC_DISCARD_WORDS.contains(&clean.as_str())
-            && clean.len() >= 4
-            && !clean.chars().all(|c| c.is_ascii_digit())
+            && is_lexically_valid(&clean)
+            && (clean.len() >= 4 || is_recognized_acronym(&clean))
         {
             return Some(capitalize(&clean));
         }
@@ -522,60 +411,56 @@ fn extract_salient_subject(
     None
 }
 
-/// Extracts the most salient topic term from the document when similarity is diffuse
+/// Dynamically extracts the most salient topic token for a document or media asset.
 fn extract_salient_topic(
-    term_freq: &HashMap<String, f32>,
+    file_tokens: &[String],
+    doc_vector: &HashMap<String, f32>,
     extracted_keywords: &[String],
-    file_name: &str,
     default_fallback: &str,
 ) -> String {
-    // 1. Check extracted keywords excluding generic noise
-    for kw in extracted_keywords {
-        let clean = kw.trim();
-        let lower = clean.to_lowercase();
-        if clean.len() >= 3
-            && !clean.contains("redacted")
-            && !GENERIC_DISCARD_WORDS.contains(&lower.as_str())
-            && !clean.chars().all(|c| c.is_ascii_digit())
+    // 1. Check filename tokens (excluding generic discards and stop words)
+    for tok in file_tokens {
+        let clean = tok.to_lowercase();
+        let s = stem(&clean);
+
+        if !GENERIC_DISCARD_WORDS.contains(&clean.as_str())
+            && !GENERIC_DISCARD_WORDS.contains(&s.as_str())
+            && !is_stopword(&clean)
+            && is_lexically_valid(&clean)
+            && (clean.len() >= 4 || is_recognized_acronym(&clean))
         {
-            return capitalize(clean);
+            return format_subtopic_token(&clean);
         }
     }
 
-    // 2. Check term frequencies sorted by weight
-    let mut terms: Vec<_> = term_freq.iter().collect();
+    // 2. Check extracted keywords
+    for kw in extracted_keywords {
+        let clean = kw.trim().to_lowercase();
+        if !GENERIC_DISCARD_WORDS.contains(&clean.as_str())
+            && !is_stopword(&clean)
+            && is_lexically_valid(&clean)
+            && (clean.len() >= 3 || is_recognized_acronym(&clean))
+        {
+            return format_subtopic_token(&clean);
+        }
+    }
+
+    // 3. Check document vector terms
+    let mut terms: Vec<_> = doc_vector.iter().collect();
     terms.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     for (term, _) in terms {
-        let lower = term.to_lowercase();
-        if term.len() >= 4
-            && !term.chars().all(|c| c.is_ascii_digit())
-            && !GENERIC_DISCARD_WORDS.contains(&lower.as_str())
+        let clean = term.to_lowercase();
+        if !GENERIC_DISCARD_WORDS.contains(&clean.as_str())
+            && !is_stopword(&clean)
+            && is_lexically_valid(&clean)
+            && (clean.len() >= 4 || is_recognized_acronym(&clean))
         {
-            return capitalize(term);
-        }
-    }
-
-    // 3. Check filename token
-    for tok in file_name.split(|c: char| !c.is_alphanumeric()) {
-        let lower = tok.to_lowercase();
-        if tok.len() >= 4
-            && !tok.chars().all(|c| c.is_ascii_digit())
-            && !GENERIC_DISCARD_WORDS.contains(&lower.as_str())
-        {
-            return capitalize(tok);
+            return format_subtopic_token(&clean);
         }
     }
 
     default_fallback.to_string()
-}
-
-pub fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-    }
 }
 
 #[cfg(test)]
