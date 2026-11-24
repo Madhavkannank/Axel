@@ -5,27 +5,36 @@ from config import GROQ_API_KEY, MODEL_NAME, MODEL_FALLBACKS
 
 
 def redact_sensitive_data(text):
-    """Shields PII, government IDs, and credentials before cloud transmission (H14)."""
+    """Shields PII, government IDs, and credentials before cloud transmission (H10)."""
     if not text:
         return ""
     # Redact Aadhaar: 12 digits, often formatted as 4-4-4
     text = re.sub(r'\b\d{4}\s?\d{4}\s?\d{4}\b', '[REDACTED_AADHAAR]', text)
     # Redact PAN: 5 letters, 4 digits, 1 letter
     text = re.sub(r'\b[A-Z]{5}[0-9]{4}[A-Z]\b', '[REDACTED_PAN]', text)
+    # Redact US SSN: 3-2-4 digits
+    text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[REDACTED_SSN]', text)
+    # Redact Credit Cards: 16 digits
+    text = re.sub(r'\b(?:\d{4}[ -]?){3}\d{4}\b', '[REDACTED_CARD]', text)
     # Redact Private Keys and API Keys
-    text = re.sub(r'-----BEGIN (RSA )?PRIVATE KEY-----[\s\S]*?-----END (RSA )?PRIVATE KEY-----', '[REDACTED_PRIVATE_KEY]', text)
-    text = re.sub(r'\b(gsk_|sk_|ghp_|AKIA)[A-Za-z0-9_]{16,}\b', '[REDACTED_KEY]', text)
+    text = re.sub(r'-----BEGIN (?:RSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA )?PRIVATE KEY-----', '[REDACTED_PRIVATE_KEY]', text)
+    text = re.sub(r'\b(?:gsk_|sk_|ghp_|AKIA)[A-Za-z0-9_]{16,}\b', '[REDACTED_KEY]', text)
+    text = re.sub(r'(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd)\s*[:=]\s*["\']?[A-Za-z0-9_\-\.]{8,}["\']?', '[REDACTED_CREDENTIAL]', text)
+    # Redact Email addresses
+    text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[REDACTED_EMAIL]', text)
     return text
 
 
 def is_identity_document(text, file_name=""):
-    """Detects high-risk government IDs that must never be transmitted to external cloud LLMs (H11/H14)."""
+    """Detects high-risk government IDs that must never be transmitted to external cloud LLMs (H10)."""
     combined = (str(text) + " " + str(file_name)).lower()
     strong_markers = [
         "aadhaar card", "unique identification authority", "uidai",
         "income tax department", "permanent account number card", "pan card",
         "election commission of india", "voter identity card", "epic no",
-        "republic of india passport", "driver license", "driving licence"
+        "republic of india passport", "driver license", "driving licence",
+        "social security card", "social security administration",
+        "identity card", "national id card", "citizen card",
     ]
     return any(marker in combined for marker in strong_markers)
 
@@ -100,7 +109,7 @@ def safe_parse_llm_response(response_text):
     try:
         if not response_text:
             return None
-            
+
         start_idx = response_text.find('{')
         end_idx = response_text.rfind('}')
         if start_idx != -1 and end_idx != -1:
@@ -112,16 +121,16 @@ def safe_parse_llm_response(response_text):
         pass
     return None
 
-def generate_keywords(text, ml_category=None, ml_keywords=None):
+def generate_keywords(text, ml_category=None, ml_keywords=None, file_name=""):
     """Sends text to Groq API and returns strict JSON output with model fallback."""
     fallback_response = {"category": "Unknown", "keywords": []}
 
     if not text:
         return fallback_response
 
-    # Privacy shield: Check for high-risk identity documents
-    if is_identity_document(text):
-        print("[PRIVACY] High-risk government identity document detected. Cloud LLM transmission prevented (H14).")
+    # Privacy shield: Check for high-risk identity documents on untruncated text
+    if is_identity_document(text, file_name):
+        print("[PRIVACY] High-risk government identity document detected. Cloud LLM transmission prevented (H10).")
         return {"category": "Government ID", "keywords": ["identity", "confidential", "local_only"]}
 
     # Redact PII and credentials before any cloud transmission
@@ -138,8 +147,10 @@ def generate_keywords(text, ml_category=None, ml_keywords=None):
         return fallback_response
 
     ml_context = ""
-    if ml_category and ml_keywords:
-        ml_context = f"\n    I already have a machine learning guess:\n    Suggested ML Category: {ml_category}\n    Suggested ML Keywords: {', '.join(ml_keywords)}\n    Use the ML suggestions to guide your output if they seem correct. Otherwise, improve them.\n"
+    if ml_category or ml_keywords:
+        clean_cat = redact_sensitive_data(str(ml_category or ""))
+        clean_kws = [redact_sensitive_data(str(k)) for k in (ml_keywords or [])]
+        ml_context = f"\n    I already have a machine learning guess:\n    Suggested ML Category: {clean_cat}\n    Suggested ML Keywords: {', '.join(clean_kws)}\n    Use the ML suggestions to guide your output if they seem correct. Otherwise, improve them.\n"
 
     prompt = f"""
     Analyze the following text and provide a category and a list of MAXIMUM 5 keywords. The keywords are used to add a tag into the meta data for faster searching using general terms ,
@@ -180,6 +191,13 @@ def generate_keywords_from_file_context(file_name, file_type, reason=""):
         "keywords": [file_type, "unreadable", "review"]
     }
 
+    # Privacy check on file_name
+    if is_identity_document("", file_name):
+        print("[PRIVACY] High-risk filename detected. Cloud LLM transmission prevented (H10).")
+        return {"category": "Government ID", "keywords": ["identity", "confidential", "local_only"]}
+
+    clean_file_name = redact_sensitive_data(file_name)
+
     if _key_missing_or_placeholder():
         print("[WARNING] GROQ_API_KEY missing/placeholder. Using safe fallback.")
         return fallback_response
@@ -195,7 +213,7 @@ def generate_keywords_from_file_context(file_name, file_type, reason=""):
     Infer a best-effort category and up to 5 keywords from available file context.
     Be conservative and generic when uncertain.
 
-    File name: {file_name}
+    File name: {clean_file_name}
     File type: {file_type}
     Failure reason: {reason}
 
@@ -209,7 +227,7 @@ def generate_keywords_from_file_context(file_name, file_type, reason=""):
     stricter_prompt = f"""
     Return ONLY valid raw JSON with keys "category" and "keywords".
     No markdown and no explanation.
-    File name: {file_name}
+    File name: {clean_file_name}
     File type: {file_type}
     """
 

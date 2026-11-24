@@ -1,7 +1,7 @@
 use crate::ai::AiEngine;
 use crate::config::Config;
 use crate::engine::{
-    analyze_and_build_item, build_document_detail, build_graph_snapshot, build_system_stats,
+    analyze_and_build_item, build_graph_snapshot, build_system_stats,
     delete_document_from_index, scan_folder_into_items, DocumentDetail, GraphSnapshot, ScanSummary,
     SystemStats,
 };
@@ -10,7 +10,7 @@ use crate::index::{DocumentIndex, IndexItem};
 use crate::watcher::FolderWatcher;
 use axum::{
     body::Body,
-    extract::{Multipart, Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
     http::{header, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -23,7 +23,7 @@ use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
@@ -39,12 +39,16 @@ pub struct AppState {
     pub index: Arc<Mutex<DocumentIndex>>,
     pub ai: Arc<AiEngine>,
     pub events_tx: broadcast::Sender<String>,
+    pub api_token: Option<String>,
     pub session_token: String,
-    pub is_explicit_token: bool,
     pub is_remote: bool,
 }
 
 pub fn generate_secure_token() -> String {
+    let mut buf = [0u8; 32];
+    if getrandom::getrandom(&mut buf).is_ok() {
+        return buf.iter().map(|b| format!("{:02x}", b)).collect();
+    }
     use sha2::{Digest, Sha256};
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -52,23 +56,22 @@ pub fn generate_secure_token() -> String {
         .unwrap_or(0);
     let pid = std::process::id();
     let mut hasher = Sha256::new();
-    hasher.update(b"axel_token_secret_");
+    hasher.update(b"axel_secure_token_fallback_");
     hasher.update(now.to_le_bytes());
     hasher.update(pid.to_le_bytes());
-    let addr = &now as *const u128 as usize;
-    hasher.update(addr.to_le_bytes());
     format!("{:x}", hasher.finalize())
 }
 
 pub fn is_request_authorized(
     headers: &axum::http::HeaderMap,
-    uri: &axum::http::Uri,
-    expected_token: &str,
+    expected_api_token: Option<&str>,
+    expected_session_token: &str,
 ) -> bool {
     // 1. Authorization: Bearer <token>
     if let Some(auth_val) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         if let Some(token) = auth_val.strip_prefix("Bearer ") {
-            if token.trim() == expected_token {
+            let t = token.trim();
+            if t == expected_session_token || expected_api_token.map_or(false, |k| t == k) {
                 return true;
             }
         }
@@ -76,16 +79,18 @@ pub fn is_request_authorized(
 
     // 2. X-API-Key: <token>
     if let Some(key_val) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-        if key_val.trim() == expected_token {
+        let t = key_val.trim();
+        if t == expected_session_token || expected_api_token.map_or(false, |k| t == k) {
             return true;
         }
     }
 
-    // 3. Query parameter: ?token=<token>
-    if let Some(query) = uri.query() {
-        for pair in query.split('&') {
-            if let Some(token) = pair.strip_prefix("token=") {
-                if token == expected_token {
+    // 3. Cookie: axel_session=<token>
+    if let Some(cookie_hdr) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+        for cookie in cookie_hdr.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("axel_session=") {
+                if val == expected_session_token {
                     return true;
                 }
             }
@@ -101,27 +106,22 @@ async fn auth_middleware(
     next: axum::middleware::Next,
 ) -> Response {
     let path = req.uri().path();
-    let method = req.method();
 
-    // Static assets and UI are always accessible
-    if path == "/" || path == "/styles.css" || path == "/app.js" {
+    // Static assets, UI and auth session login are accessible without prior token
+    if path == "/" || path == "/styles.css" || path == "/app.js" || path == "/api/auth/session" {
         return next.run(req).await;
     }
 
-    let is_sensitive = path.ends_with("/raw")
-        || path == "/api/scan"
-        || path == "/api/upload"
-        || *method == axum::http::Method::DELETE;
-
-    // Remote binding and explicit token require auth for all API routes.
-    // Sensitive mutating/download routes always require auth even on loopback (H01).
-    let requires_auth = state.is_explicit_token || state.is_remote || is_sensitive;
-
-    if requires_auth && !is_request_authorized(req.headers(), req.uri(), &state.session_token) {
+    // H01 & H02: Require authorization for all API routes
+    if !is_request_authorized(
+        req.headers(),
+        state.api_token.as_deref(),
+        &state.session_token,
+    ) {
         return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"Unauthorized: Valid API token required"}"#))
+            .body(Body::from(r#"{"error":"Unauthorized: Valid API token or session required"}"#))
             .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response());
     }
 
@@ -134,13 +134,19 @@ pub fn create_router(state: AppState) -> Router {
         .allow_origin(tower_http::cors::AllowOrigin::predicate(
             move |origin: &HeaderValue, _parts: &axum::http::request::Parts| {
                 if let Ok(orig_str) = origin.to_str() {
-                    // Always allow localhost and loopback interfaces
-                    if orig_str.starts_with("http://localhost")
-                        || orig_str.starts_with("http://127.0.0.1")
-                        || orig_str.starts_with("https://localhost")
-                        || orig_str.starts_with("https://127.0.0.1")
-                    {
-                        return true;
+                    if let Ok(url) = reqwest::Url::parse(orig_str) {
+                        let scheme = url.scheme();
+                        if scheme == "http" || scheme == "https" {
+                            if let Some(host) = url.host_str() {
+                                if host == "localhost"
+                                    || host == "127.0.0.1"
+                                    || host == "::1"
+                                    || host == "[::1]"
+                                {
+                                    return true;
+                                }
+                            }
+                        }
                     }
                     if allowed_origins_list.iter().any(|allowed| orig_str == allowed) {
                         return true;
@@ -158,6 +164,7 @@ pub fn create_router(state: AppState) -> Router {
         .allow_headers([
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
+            header::COOKIE,
             axum::http::HeaderName::from_static("x-api-key"),
         ]);
 
@@ -165,6 +172,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/", get(serve_ui))
         .route("/styles.css", get(serve_css))
         .route("/app.js", get(serve_js))
+        .route("/api/auth/session", post(create_auth_session))
         .route("/api/graph", get(get_graph))
         .route("/api/documents", get(list_documents))
         .route("/api/documents/:hash", get(get_document_detail).delete(delete_document))
@@ -174,20 +182,26 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/scan", post(trigger_scan))
         .route("/api/upload", post(upload_document))
         .route("/api/events", get(sse_events))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(cors)
         .with_state(state)
+}
+
+fn mask_token(token: &str) -> String {
+    if token.len() <= 8 {
+        "***".to_string()
+    } else {
+        format!("{}...{}", &token[..4], &token[token.len() - 4..])
+    }
 }
 
 pub async fn run_server(config: Config, open_browser: bool) -> Result<(), Box<dyn std::error::Error>> {
     let port = config.port;
     let host = config.host.clone();
     let is_remote = host != "127.0.0.1" && host != "localhost" && host != "::1";
-    let is_explicit_token = config.api_token.is_some();
-    let session_token = config
-        .api_token
-        .clone()
-        .unwrap_or_else(generate_secure_token);
+    let api_token = config.api_token.clone();
+    let session_token = generate_secure_token();
 
     let index = Arc::new(Mutex::new(DocumentIndex::load(&config.index_file)));
     let ai = Arc::new(AiEngine::new(&config));
@@ -198,8 +212,8 @@ pub async fn run_server(config: Config, open_browser: bool) -> Result<(), Box<dy
         index,
         ai,
         events_tx,
+        api_token: api_token.clone(),
         session_token: session_token.clone(),
-        is_explicit_token,
         is_remote,
     };
 
@@ -207,12 +221,18 @@ pub async fn run_server(config: Config, open_browser: bool) -> Result<(), Box<dy
 
     let app = create_router(state);
 
-    let addr = format!("{host}:{port}");
+    let addr = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let bound_port = listener.local_addr()?.port();
 
-    let local_url = if host == "0.0.0.0" {
+    let local_url = if host == "0.0.0.0" || host == "::" {
         format!("http://localhost:{bound_port}")
+    } else if host.contains(':') && !host.starts_with('[') {
+        format!("http://[{host}]:{bound_port}")
     } else {
         format!("http://{host}:{bound_port}")
     };
@@ -221,15 +241,14 @@ pub async fn run_server(config: Config, open_browser: bool) -> Result<(), Box<dy
     println!("  AXEL Server running at: {local_url}");
     if is_remote {
         println!("  [SECURITY NOTICE] Server is bound to remote host '{host}'");
-        if !is_explicit_token {
-            println!("  [WARN] No AXEL_API_KEY was specified. Generated remote session token:");
-            println!("         {session_token}");
-            println!("  All API requests from remote origins must include:");
-            println!("         Header: Authorization: Bearer {session_token}");
+        if api_token.is_none() {
+            println!("  [INFO] Ephemeral remote session token generated (masked):");
+            println!("         {}", mask_token(&session_token));
+            println!("  Set AXEL_API_KEY environment variable for persistent credentials.");
         }
     } else {
-        println!("  Loopback interface active (127.0.0.1).");
-        println!("  Local session token: {session_token}");
+        println!("  Loopback interface active ({host}).");
+        println!("  Session token: {}", mask_token(&session_token));
     }
     println!("  Web UI:    {local_url}/");
     println!("  Graph API: {local_url}/api/graph");
@@ -245,7 +264,7 @@ pub async fn run_server(config: Config, open_browser: bool) -> Result<(), Box<dy
 
 fn spawn_background_watcher(state: AppState) {
     let watch_dir = state.config.input_folder.clone();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::watcher::WatchEvent>();
 
     std::thread::spawn(move || {
         let watcher = match FolderWatcher::new(&watch_dir) {
@@ -257,8 +276,8 @@ fn spawn_background_watcher(state: AppState) {
         };
 
         loop {
-            while let Some(path) = watcher.poll_next_file() {
-                if tx.send(path).is_err() {
+            while let Some(event) = watcher.poll_next_event() {
+                if tx.send(event).is_err() {
                     return;
                 }
             }
@@ -267,49 +286,80 @@ fn spawn_background_watcher(state: AppState) {
     });
 
     tokio::spawn(async move {
-        while let Some(path) = rx.recv().await {
-            tokio::time::sleep(Duration::from_millis(350)).await;
-            if !path.exists() || !path.is_file() {
-                continue;
-            }
-
-            let hash = match DocumentIndex::compute_file_hash(&path) {
-                Some(h) => h,
-                None => continue,
-            };
-
-            let path_str = path.display().to_string();
-            let is_duplicate_download = {
-                let mut index = state.index.lock().await;
-                if let Some(existing) = index.find_by_hash(&hash) {
-                    if !existing.physical_paths.contains(&path_str) {
-                        let mut dup_item = existing.clone();
-                        dup_item.path = path_str.clone();
-                        index.upsert(dup_item);
-                        let _ = index.save();
-                        true
-                    } else {
-                        // Already known physical path
+        while let Some(event) = rx.recv().await {
+            match event {
+                crate::watcher::WatchEvent::CreatedOrModified(path) => {
+                    tokio::time::sleep(Duration::from_millis(350)).await;
+                    if !path.exists() || !path.is_file() {
                         continue;
                     }
-                } else {
-                    false
-                }
-            };
 
-            if is_duplicate_download {
-                emit_index_event(&state.events_tx, "duplicate_detected", path.file_name().and_then(|s| s.to_str()));
-                continue;
-            }
+                    let hash = match DocumentIndex::compute_file_hash(&path) {
+                        Some(h) => h,
+                        None => continue,
+                    };
 
-            if let Some(item) = analyze_and_build_item(&path, &state.ai).await {
-                let file_name = item.file.clone();
-                {
-                    let mut index = state.index.lock().await;
-                    index.upsert(item);
-                    let _ = index.save();
+                    let path_str = path.display().to_string();
+                    let is_duplicate_download = {
+                        let mut index = state.index.lock().await;
+                        if let Some(existing) = index.find_by_hash(&hash) {
+                            if !existing.physical_paths.contains(&path_str) {
+                                let mut dup_item = existing.clone();
+                                dup_item.path = path_str.clone();
+                                index.upsert(dup_item);
+                                match index.save() {
+                                    Ok(_) => true,
+                                    Err(e) => {
+                                        eprintln!("[Watcher] Failed to save index: {e}");
+                                        false
+                                    }
+                                }
+                            } else {
+                                // Already known physical path
+                                continue;
+                            }
+                        } else {
+                            false
+                        }
+                    };
+
+                    if is_duplicate_download {
+                        emit_index_event(&state.events_tx, "duplicate_detected", path.file_name().and_then(|s| s.to_str()));
+                        continue;
+                    }
+
+                    if let Some(item) = analyze_and_build_item(&path, &state.ai).await {
+                        let file_name = item.file.clone();
+                        let save_ok = {
+                            let mut index = state.index.lock().await;
+                            index.upsert(item);
+                            match index.save() {
+                                Ok(_) => true,
+                                Err(e) => {
+                                    eprintln!("[Watcher] Failed to save index: {e}");
+                                    false
+                                }
+                            }
+                        };
+                        if save_ok {
+                            emit_index_event(&state.events_tx, "watcher", Some(&file_name));
+                        }
+                    }
                 }
-                emit_index_event(&state.events_tx, "watcher", Some(&file_name));
+                crate::watcher::WatchEvent::Removed(path) => {
+                    let changed = {
+                        let mut index = state.index.lock().await;
+                        if index.remove_path(&path) {
+                            let _ = index.save();
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if changed {
+                        emit_index_event(&state.events_tx, "file_removed", path.file_name().and_then(|s| s.to_str()));
+                    }
+                }
             }
         }
     });
@@ -334,14 +384,73 @@ fn static_asset_response(body: &'static str, content_type: &'static str) -> Resp
 }
 
 async fn serve_ui(State(state): State<AppState>) -> impl IntoResponse {
-    let token_meta = format!(r#"<meta name="axel-token" content="{}">"#, state.session_token);
+    // Under H01: Do NOT include configured API key in public HTML!
+    // In remote mode or if explicit token was configured, require bootstrap in UI:
+    // Only pass browser session token if running locally on loopback without explicit secret key.
+    let token_for_ui = if !state.is_remote && state.api_token.is_none() {
+        state.session_token.as_str()
+    } else {
+        ""
+    };
+
+    let token_meta = if !token_for_ui.is_empty() {
+        format!(r#"<meta name="axel-token" content="{}">"#, token_for_ui)
+    } else {
+        String::new()
+    };
+
     let injected_html = UI_HTML.replace("<head>", &format!("<head>\n    {token_meta}"));
-    Response::builder()
+    let mut resp = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))
-        .header(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))
-        .body(Body::from(injected_html))
+        .header(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+
+    if !token_for_ui.is_empty() {
+        if let Ok(cookie_val) = HeaderValue::from_str(&format!(
+            "axel_session={}; Path=/; HttpOnly; SameSite=Strict",
+            token_for_ui
+        )) {
+            resp = resp.header(header::SET_COOKIE, cookie_val);
+        }
+    }
+
+    resp.body(Body::from(injected_html))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+#[derive(Deserialize)]
+struct AuthSessionRequest {
+    token: String,
+}
+
+async fn create_auth_session(
+    State(state): State<AppState>,
+    Json(payload): Json<AuthSessionRequest>,
+) -> Result<Response, (StatusCode, String)> {
+    let t = payload.token.trim();
+    let matches_api = state.api_token.as_deref().map_or(false, |k| k == t);
+    let matches_session = t == state.session_token;
+    if !matches_api && !matches_session {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid credential".to_string()));
+    }
+
+    let cookie = format!(
+        "axel_session={}; Path=/; HttpOnly; SameSite=Strict",
+        state.session_token
+    );
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("")),
+        )
+        .body(Body::from(format!(
+            r#"{{"authenticated":true,"session_token":"{}"}}"#,
+            state.session_token
+        )))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
 }
 
 async fn serve_css() -> impl IntoResponse {
@@ -394,7 +503,15 @@ async fn get_document_detail(
             .ok_or_else(|| (StatusCode::NOT_FOUND, "Document not found".to_string()))?
     };
 
-    Ok(Json(build_document_detail(&item)))
+    let workspace = state.config.input_folder.clone();
+    // Run verification & text extraction off the main Tokio executor to prevent thread blocking (H02, H11)
+    let detail = tokio::task::spawn_blocking(move || {
+        crate::engine::build_document_detail_verified(&item, &workspace)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Detail task panicked: {e}")))?;
+
+    Ok(Json(detail))
 }
 
 #[derive(Deserialize)]
@@ -451,47 +568,16 @@ async fn get_document_raw(
             .ok_or_else(|| (StatusCode::NOT_FOUND, "Document not found".to_string()))?
     };
 
-    let path = Path::new(&item.path);
+    // H02, M03: Resolve verified live path with workspace containment and SHA-256 hash validation
+    let valid_path = crate::engine::resolve_verified_document_path(&item, &state.config.input_folder)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "File missing on disk or security verification failed (file hash modified / outside workspace)".to_string(),
+            )
+        })?;
 
-    // H07: Validate workspace boundary
-    if !crate::engine::is_path_inside_workspace(path, &state.config.input_folder) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Access denied: Target document path is outside workspace boundaries".to_string(),
-        ));
-    }
-
-    if !path.exists() {
-        return Err((StatusCode::NOT_FOUND, "File missing on disk".to_string()));
-    }
-
-    // H06: Verify disk file hash matches document hash to prevent serving modified/tampered bytes
-    let valid_path = match DocumentIndex::compute_file_hash(path) {
-        Some(ref chash) if chash == &hash => path.to_path_buf(),
-        _ => {
-            // Check registered physical aliases
-            let mut found = None;
-            for alias in &item.physical_paths {
-                let apath = Path::new(alias);
-                if apath.exists() && crate::engine::is_path_inside_workspace(apath, &state.config.input_folder) {
-                    if let Some(ref ahash) = DocumentIndex::compute_file_hash(apath) {
-                        if ahash == &hash {
-                            found = Some(apath.to_path_buf());
-                            break;
-                        }
-                    }
-                }
-            }
-            found.ok_or_else(|| {
-                (
-                    StatusCode::CONFLICT,
-                    "Security verification failed: File on disk has been modified and no longer matches indexed hash".to_string(),
-                )
-            })?
-        }
-    };
-
-    // H13: Check file size ceiling (100 MB)
+    // H11: Check file size ceiling (100 MB) BEFORE reading into memory
     let meta = tokio::fs::metadata(&valid_path)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to stat file: {e}")))?;
@@ -507,9 +593,12 @@ async fn get_document_raw(
         ));
     }
 
-    let bytes = tokio::fs::read(&valid_path)
+    let file = tokio::fs::File::open(&valid_path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read file: {e}")))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to open file: {e}")))?;
+
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = Body::from_stream(stream);
 
     let content_type = match valid_path
         .extension()
@@ -534,8 +623,9 @@ async fn get_document_raw(
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, meta.len().to_string())
         .header(header::CONTENT_DISPOSITION, disposition)
-        .body(Body::from(bytes))
+        .body(body)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Response error: {e}")))
 }
 
@@ -576,7 +666,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<SystemStats> {
     Json(build_system_stats(&state.config, &index))
 }
 
-async fn trigger_scan(State(state): State<AppState>) -> Json<ScanSummary> {
+async fn trigger_scan(State(state): State<AppState>) -> Result<Json<ScanSummary>, (StatusCode, String)> {
     let existing_hashes: HashSet<String> = {
         let index = state.index.lock().await;
         index.all().iter().map(|i| i.hash.clone()).collect()
@@ -591,11 +681,16 @@ async fn trigger_scan(State(state): State<AppState>) -> Json<ScanSummary> {
         for item in items_to_insert {
             index.upsert(item);
         }
-        let _ = index.save();
+        index.save().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to persist index after scan: {e}"),
+            )
+        })?;
         emit_index_event(&state.events_tx, "scan", None);
     }
 
-    Json(summary)
+    Ok(Json(summary))
 }
 
 #[derive(Serialize)]
@@ -613,8 +708,18 @@ async fn upload_document(
     }
 
     let mut uploaded = Vec::new();
+    let mut next_field_error = None;
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                next_field_error = Some(e);
+                break;
+            }
+        };
+
         let raw_name = match field.file_name() {
             Some(name) => name.to_string(),
             None => continue,
@@ -649,60 +754,34 @@ async fn upload_document(
         upload_hasher.update(&data);
         let upload_hash = format!("{:x}", upload_hasher.finalize());
 
-        let default_target = state.config.input_folder.join(&safe_name);
+        // H04: Atomic file publishing without replacement using exclusive creation handles
+        let exclusive = crate::engine::create_exclusive_workspace_file(
+            &state.config.input_folder,
+            &safe_name,
+            Some(&upload_hash),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create destination file: {e}")))?;
 
-        let (final_target_path, final_file_name) = if default_target.exists() {
-            // Check if existing file is already identical
-            if let Some(existing_hash) = DocumentIndex::compute_file_hash(&default_target) {
-                if existing_hash == upload_hash {
-                    // Exact duplicate already exists at destination; reuse safely without overwriting
-                    (default_target, safe_name)
-                } else {
-                    // Different file with the same name exists! Prevent overwrite data loss (H02).
-                    crate::engine::resolve_collision_safe_path(&state.config.input_folder, &safe_name)
-                }
-            } else {
-                crate::engine::resolve_collision_safe_path(&state.config.input_folder, &safe_name)
+        let final_target_path = exclusive.path;
+        let final_file_name = exclusive.file_name;
+
+        if !exclusive.reused_existing {
+            use std::io::Write;
+            let mut file = exclusive.file;
+            if let Err(e) = file.write_all(&data) {
+                let _ = std::fs::remove_file(&final_target_path);
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to write upload data: {e}"),
+                ));
             }
-        } else if std::fs::symlink_metadata(&default_target).is_ok() {
-            // Existing symlink target! Prevent following symlink (H02)
-            crate::engine::resolve_collision_safe_path(&state.config.input_folder, &safe_name)
-        } else {
-            (default_target, safe_name)
-        };
-
-        // If target file doesn't already exist with identical content, write via secure staging file
-        if !final_target_path.exists() {
-            static UPLOAD_STAGE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-            let count = UPLOAD_STAGE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let staging_name = format!(".tmp_upload_{}_{}_{}.tmp", std::process::id(), now, count);
-            let staging_path = state.config.input_folder.join(&staging_name);
-
-            // Write using create_new(true) to ensure we never follow existing symlinks
-            let _ = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&staging_path)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create upload staging file: {e}")))?;
-
-            tokio::fs::write(&staging_path, &data)
-                .await
-                .map_err(|e| {
-                    let _ = std::fs::remove_file(&staging_path);
-                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write upload data: {e}"))
-                })?;
-
-            tokio::fs::rename(&staging_path, &final_target_path)
-                .await
-                .map_err(|e| {
-                    let _ = std::fs::remove_file(&staging_path);
-                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to finalize upload file: {e}"))
-                })?;
+            if let Err(e) = file.flush() {
+                let _ = std::fs::remove_file(&final_target_path);
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to flush upload data: {e}"),
+                ));
+            }
         }
 
         // M15 & H15: Run unified analysis (handling both code files and document files)
@@ -725,6 +804,15 @@ async fn upload_document(
         uploaded.push(item);
     }
 
+    if let Some(err) = next_field_error {
+        if uploaded.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Failed to parse multipart upload stream: {err}"),
+            ));
+        }
+    }
+
     if uploaded.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -737,7 +825,12 @@ async fn upload_document(
         for item in &uploaded {
             index.upsert(item.clone());
         }
-        let _ = index.save();
+        index.save().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to persist index after upload: {e}"),
+            )
+        })?;
     }
 
     emit_index_event(

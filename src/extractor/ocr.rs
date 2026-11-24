@@ -151,45 +151,70 @@ pub fn extract_text<P: AsRef<Path>>(path: P) -> Result<String, String> {
     }
 }
 
+const OCR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const MAX_OCR_OUTPUT_BYTES: u64 = 5 * 1024 * 1024; // 5 MB max output
+
+// H11: Run external OCR worker with bounded execution time and memory-capped output
+fn run_command_bounded(
+    mut cmd: Command,
+    timeout: std::time::Duration,
+    max_bytes: u64,
+) -> Result<String, String> {
+    use std::io::Read;
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn OCR worker: {e}"))?;
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    if let Some(stdout) = child.stdout.take() {
+                        let mut output = Vec::new();
+                        let _ = stdout.take(max_bytes).read_to_end(&mut output);
+                        return Ok(String::from_utf8_lossy(&output).trim().to_string());
+                    }
+                    return Ok(String::new());
+                } else {
+                    return Err(format!("OCR worker exited with status: {status}"));
+                }
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("OCR worker timed out after {:?}", timeout));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!("Error waiting for OCR worker: {e}"));
+            }
+        }
+    }
+}
+
 fn run_tesseract_ocr(path: &Path) -> Result<String, String> {
     let bin = find_tesseract_binary().unwrap_or_else(|| "tesseract".to_string());
-    let output = Command::new(bin)
-        .arg(path)
-        .arg("stdout")
-        .arg("--oem")
-        .arg("1")
-        .output()
-        .map_err(|e| format!("Failed to execute Tesseract: {e}"))?;
+    let mut cmd = Command::new(bin);
+    cmd.arg(path).arg("stdout").arg("--oem").arg("1");
 
-    if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if text.is_empty() {
-            Ok(extract_image_filename_and_metadata_text(path))
-        } else {
-            Ok(text)
-        }
-    } else {
-        // Fallback to filename metadata on engine failure
-        Ok(extract_image_filename_and_metadata_text(path))
+    match run_command_bounded(cmd, OCR_TIMEOUT, MAX_OCR_OUTPUT_BYTES) {
+        Ok(text) if !text.is_empty() => Ok(text),
+        _ => Ok(extract_image_filename_and_metadata_text(path)),
     }
 }
 
 fn run_cli_worker_ocr(path: &Path) -> Result<String, String> {
     let bin = find_cli_ocr_binary().unwrap_or_else(|| "ocrs".to_string());
-    let output = Command::new(bin)
-        .arg(path)
-        .output()
-        .map_err(|e| format!("Failed to execute CLI OCR: {e}"))?;
+    let mut cmd = Command::new(bin);
+    cmd.arg(path);
 
-    if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if text.is_empty() {
-            Ok(extract_image_filename_and_metadata_text(path))
-        } else {
-            Ok(text)
-        }
-    } else {
-        Ok(extract_image_filename_and_metadata_text(path))
+    match run_command_bounded(cmd, OCR_TIMEOUT, MAX_OCR_OUTPUT_BYTES) {
+        Ok(text) if !text.is_empty() => Ok(text),
+        _ => Ok(extract_image_filename_and_metadata_text(path)),
     }
 }
 
@@ -207,13 +232,9 @@ fn run_lightweight_model_ocr(path: &Path, model_dir: &Path) -> Result<String, St
         }
         cmd.arg(path);
 
-        if let Ok(out) = cmd.output() {
-            if out.status.success() {
-                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !text.is_empty() {
-                    return Ok(text);
-                }
-            }
+        match run_command_bounded(cmd, OCR_TIMEOUT, MAX_OCR_OUTPUT_BYTES) {
+            Ok(text) if !text.is_empty() => return Ok(text),
+            _ => {}
         }
     }
 

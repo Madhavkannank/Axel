@@ -6,6 +6,7 @@
     "Cargo.lock": [],
     "check_ready.py": [],
     "ui/app.js": [],
+    "ui/index.html": [],
     "run_test.py": [],
     "test_desktop_app.py": []
   },

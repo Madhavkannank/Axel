@@ -73,6 +73,19 @@ pub struct DuplicateCluster {
     pub copy_count: usize,
 }
 
+fn is_file_like_segment(seg: &str) -> bool {
+    if let Some(pos) = seg.rfind('.') {
+        if pos > 0 && pos < seg.len() - 1 {
+            let ext = &seg[pos + 1..];
+            return ext.len() >= 1
+                && ext.len() <= 5
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && ext.chars().any(|c| c.is_ascii_alphabetic());
+        }
+    }
+    false
+}
+
 /// Compute dynamic virtual paths (multiple virtual pointers) for a document.
 /// Enables a single physical file to appear in multiple logical categories without copying.
 /// Pointers are generated dynamically by the LLM (or supplied taxonomy) without hardcoded rules.
@@ -84,15 +97,39 @@ pub fn compute_virtual_paths(
 ) -> Vec<String> {
     let mut virtual_paths = Vec::new();
 
-    // 1. Ingest dynamic LLM-discovered semantic paths
+    // 1. Ingest dynamic LLM-discovered semantic paths, sanitizing spurious file extensions
     for p in suggested_paths {
         let clean = p.trim().trim_matches('/');
-        if !clean.is_empty() {
-            if clean.ends_with(file_name) {
-                virtual_paths.push(clean.to_string());
-            } else {
-                virtual_paths.push(format!("{clean}/{file_name}"));
+        if clean.is_empty() {
+            continue;
+        }
+
+        let raw_segments: Vec<&str> = clean
+            .split('/')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if raw_segments.is_empty() {
+            continue;
+        }
+
+        // Filter directory segments:
+        // - Segments matching `file_name` are the leaf item itself, not a directory.
+        // - Spurious suggested filenames with extensions (e.g. "Syllabus.pdf") must not be treated as folders.
+        let mut dir_segments: Vec<&str> = Vec::new();
+        for &seg in &raw_segments {
+            if seg == file_name {
+                continue;
             }
+            if is_file_like_segment(seg) {
+                continue;
+            }
+            dir_segments.push(seg);
+        }
+
+        if !dir_segments.is_empty() {
+            let folder_path = dir_segments.join("/");
+            virtual_paths.push(format!("{folder_path}/{file_name}"));
         }
     }
 
@@ -201,5 +238,32 @@ mod tests {
 
         // Verify total unique item pointers
         assert_eq!(tree.total_item_count(), 2);
+    }
+
+    #[test]
+    fn test_compute_virtual_paths_strips_spurious_file_extensions() {
+        let file_name = "2021-MSc Data Science - Syllabus Book.pdf";
+        let suggested = vec![
+            "Academics/Data Science/Curriculum and Syllabi.pdf".to_string(),
+            "Data Science/CIT M.Sc Data Science Syllabus.pdf/2021-MSc Data Science - Syllabus Book.pdf".to_string(),
+            "Data Science/Curriculum and Syllabi.pdf".to_string(),
+        ];
+
+        let result = compute_virtual_paths(file_name, "Data Science", &suggested, "pdf");
+
+        // "Curriculum and Syllabi.pdf" and "CIT M.Sc Data Science Syllabus.pdf" must NEVER be directory folders!
+        for path in &result {
+            assert!(
+                !path.contains(".pdf/"),
+                "Virtual path should not contain a .pdf folder segment: {path}"
+            );
+            assert!(
+                path.ends_with(file_name),
+                "Virtual path must end with actual file name: {path}"
+            );
+        }
+
+        assert!(result.contains(&format!("Academics/Data Science/{file_name}")));
+        assert!(result.contains(&format!("Data Science/{file_name}")));
     }
 }

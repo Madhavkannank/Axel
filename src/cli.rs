@@ -71,8 +71,8 @@ pub enum Commands {
         port: Option<u16>,
 
         /// Host address to bind (defaults to 127.0.0.1 for local security)
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
+        #[arg(long)]
+        host: Option<String>,
 
         /// API authentication token (if omitted, a secure session token is generated)
         #[arg(long)]

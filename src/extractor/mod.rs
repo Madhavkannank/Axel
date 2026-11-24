@@ -49,18 +49,16 @@ pub fn detect_file_type<P: AsRef<Path>>(path: P) -> FileType {
         "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" | "wma" => FileType::Audio,
         "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "tgz" => FileType::Archive,
         "txt" | "md" | "markdown" | "csv" | "tsv" | "json" | "jsonl" | "yaml" | "yml"
-        | "toml" | "xml" | "html" | "htm" | "css" | "scss" | "js" | "jsx" | "ts" | "tsx"
-        | "py" | "rs" | "go" | "java" | "c" | "cpp" | "cc" | "h" | "hpp" | "sh" | "bash"
+        | "toml" | "xml" | "html" | "htm" | "css" | "scss" | "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx"
+        | "py" | "rs" | "go" | "java" | "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "hxx" | "sh" | "bash"
         | "zsh" | "sql" | "log" | "ini" | "cfg" | "conf" | "tex" | "bib" | "org"
-        | "rst" | "diff" | "patch" => FileType::Text,
+        | "rst" | "diff" | "patch" | "lua" | "rb" | "php" | "r" | "kt" | "swift" | "pl" | "pm" => FileType::Text,
         _ => FileType::Binary,
     }
 }
 
 pub fn extract_text<P: AsRef<Path>>(path: P) -> (String, FileType) {
-    let (raw_text, file_type) = extract_raw_text(path);
-    let preprocessed = preprocess_text(&raw_text);
-    (preprocessed, file_type)
+    extract_raw_text(path)
 }
 
 pub fn extract_raw_text<P: AsRef<Path>>(path: P) -> (String, FileType) {

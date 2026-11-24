@@ -268,7 +268,7 @@ impl AxelDesktopApp {
             self.search_results.clear();
             self.search_highlight_hashes.clear();
         } else {
-            let limit = self.top_k_results.max(12);
+            let limit = self.top_k_results.max(1);
             self.search_results = self.search_index.search(&self.search_query, limit);
             self.search_highlight_hashes = self
                 .search_results
@@ -1181,7 +1181,9 @@ fn spawn_background_worker(
                                                                         &canonical_hash,
                                                                         &trash_path,
                                                                     );
-                                                                    let _ = index.save();
+                                                                    if let Err(e) = index.save() {
+                                                                        error_msg = Some(format!("Failed to save index after removing duplicate: {e}"));
+                                                                    }
                                                                 }
                                                                 Err(e) => {
                                                                     error_msg = Some(format!(
@@ -1320,7 +1322,9 @@ fn spawn_background_worker(
                                         }
                                     }
                                 }
-                                let _ = index.save();
+                                if let Err(e) = index.save() {
+                                    errors.push(format!("Failed to save index: {e}"));
+                                }
                                 if trashed_count > 0 {
                                     let mb = (bytes_saved as f64) / (1024.0 * 1024.0);
                                     emit_snapshot(
@@ -1372,13 +1376,17 @@ fn spawn_background_worker(
                                 changed = true;
                             }
                             if changed {
-                                let _ = index.save();
-                                let msg = if summary.indexed > 0 {
-                                    Some(format!("Indexed {} document(s)", summary.indexed))
+                                if let Err(e) = index.save() {
+                                    let _ = evt_tx.send(WorkerEvent::Error(format!("Failed to save index after scan: {e}")));
+                                    egui_ctx.request_repaint();
                                 } else {
-                                    None
-                                };
-                                emit_snapshot(&config, &index, msg);
+                                    let msg = if summary.indexed > 0 {
+                                        Some(format!("Indexed {} document(s)", summary.indexed))
+                                    } else {
+                                        None
+                                    };
+                                    emit_snapshot(&config, &index, msg);
+                                }
                             } else {
                                 let _ = evt_tx.send(WorkerEvent::Busy(None));
                                 egui_ctx.request_repaint();
@@ -1388,20 +1396,36 @@ fn spawn_background_worker(
                     _ = tick.tick() => {
                         if let Some(ref w) = watcher {
                             let mut changed = false;
-                            while let Some(path) = w.poll_next_file() {
-                                if let Some(hash) = DocumentIndex::compute_file_hash(&path) {
-                                    if index.find_by_hash(&hash).is_some() {
-                                        continue;
+                            while let Some(event) = w.poll_next_event() {
+                                match event {
+                                    crate::watcher::WatchEvent::CreatedOrModified(path) => {
+                                        if let Some(hash) = DocumentIndex::compute_file_hash(&path) {
+                                            if index.find_by_hash(&hash).is_some() {
+                                                if index.add_physical_alias(&hash, &path.to_string_lossy()) {
+                                                    changed = true;
+                                                }
+                                                continue;
+                                            }
+                                        }
+                                        if let Some(item) = analyze_and_build_item(&path, &ai).await {
+                                            index.upsert(item);
+                                            changed = true;
+                                        }
                                     }
-                                }
-                                if let Some(item) = analyze_and_build_item(&path, &ai).await {
-                                    index.upsert(item);
-                                    changed = true;
+                                    crate::watcher::WatchEvent::Removed(path) => {
+                                        if index.remove_path(&path) {
+                                            changed = true;
+                                        }
+                                    }
                                 }
                             }
                             if changed {
-                                let _ = index.save();
-                                emit_snapshot(&config, &index, Some("Live watcher indexed update".to_string()));
+                                if let Err(e) = index.save() {
+                                    let _ = evt_tx.send(WorkerEvent::Error(format!("Watcher failed to save index: {e}")));
+                                    egui_ctx.request_repaint();
+                                } else {
+                                    emit_snapshot(&config, &index, Some("Live watcher indexed update".to_string()));
+                                }
                             }
                         }
                     }

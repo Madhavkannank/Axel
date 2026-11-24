@@ -114,12 +114,15 @@ pub const DOC_DESCRIPTOR_WORDS: &[&str] = &[
     "university", "college", "test", "tests", "solution", "solutions", "internal",
     "internals", "assessment", "report", "msc", "bsc", "btech", "mtech", "bca", "mca",
     "phd", "be", "me", "ug", "pg", "final", "mid", "term",
+    "1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th", "first", "second",
+    "third", "fourth", "fifth", "sixth", "seventh", "eighth",
 ];
 
 /// Generic words that should never form a primary topic or hub cluster.
 const GENERIC_DISCARD_WORDS: &[&str] = &[
     "document", "records", "archive", "content", "untitled", "file", "temp", "sample",
-    "image", "video", "audio", "screenshot", "download",
+    "image", "video", "audio", "screenshot", "download", "title", "metadata", "preview",
+    "thumbnail",
 ];
 
 pub struct DynamicSemanticClassifier;
@@ -296,8 +299,11 @@ impl DynamicSemanticClassifier {
         let (category, dynamic_subtopic) = if let Some(&(space, score, ref dominant_term)) = best_match {
             // Guard: Media files without substantial document text evidence stay under Media domain.
             // Scanned images with rich OCR text (receipts, IDs, documents) can match semantic domains (H11).
+            // Media files must never falsely match Engineering / Code without genuine source code extension.
             let has_document_text = !text.trim().is_empty() && text.trim().len() >= 20;
-            let is_incompatible_media = (is_image || is_audio) && (!has_document_text || score < 0.05) && space.name != "Media";
+            let is_incompatible_media = (is_image || is_video || is_audio)
+                && (!has_document_text || score < 0.05 || (space.name == "Engineering" && !is_code))
+                && space.name != "Media";
 
             if score > 0.02 && !is_incompatible_media {
                 let subtopic = if let Some(ref term) = dominant_term {
@@ -351,6 +357,22 @@ impl DynamicSemanticClassifier {
     }
 }
 
+pub fn is_ordinal_or_numeric(s: &str) -> bool {
+    let clean = s.trim().to_lowercase();
+    if clean.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    if (clean.ends_with("th") || clean.ends_with("st") || clean.ends_with("nd") || clean.ends_with("rd"))
+        && clean.len() >= 3
+    {
+        let prefix = &clean[..clean.len() - 2];
+        if prefix.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Disentangles form descriptors from the salient subject name.
 fn extract_salient_subject(
     file_tokens: &[String],
@@ -368,6 +390,7 @@ fn extract_salient_subject(
             || DOC_DESCRIPTOR_WORDS.contains(&s.as_str())
             || GENERIC_DISCARD_WORDS.contains(&clean.as_str())
             || clean.chars().all(|c| c.is_ascii_digit())
+            || is_ordinal_or_numeric(&clean)
             || (clean.len() < 3 && !is_recognized_acronym(&clean))
             || !is_lexically_valid(&clean)
         {
@@ -393,6 +416,7 @@ fn extract_salient_subject(
         if !DOC_DESCRIPTOR_WORDS.contains(&clean.as_str())
             && !DOC_DESCRIPTOR_WORDS.contains(&s.as_str())
             && !GENERIC_DISCARD_WORDS.contains(&clean.as_str())
+            && !is_ordinal_or_numeric(&clean)
             && is_lexically_valid(&clean)
             && !clean.contains("redacted")
             && (clean.len() >= 4 || is_recognized_acronym(&clean))
@@ -412,6 +436,7 @@ fn extract_salient_subject(
         if !DOC_DESCRIPTOR_WORDS.contains(&clean.as_str())
             && !DOC_DESCRIPTOR_WORDS.contains(&s.as_str())
             && !GENERIC_DISCARD_WORDS.contains(&clean.as_str())
+            && !is_ordinal_or_numeric(&clean)
             && is_lexically_valid(&clean)
             && (clean.len() >= 4 || is_recognized_acronym(&clean))
         {
@@ -523,5 +548,29 @@ mod tests {
         let (cat, _) = DynamicSemanticClassifier::classify("", file, &[], "jpeg");
         assert!(!cat.starts_with("Academics/"), "Image must not be Academics, got: {}", cat);
         assert!(cat.starts_with("Media/"), "Image must be Media, got: {}", cat);
+    }
+
+    #[test]
+    fn test_academic_question_papers_never_categorized_as_bare_ordinal() {
+        let file = "5thSemQPs.pdf";
+        let (cat, vpaths) = DynamicSemanticClassifier::classify("", file, &[], "pdf");
+        assert_ne!(cat, "5th", "Category must not be raw ordinal '5th'");
+        assert!(cat.starts_with("Academics/"), "5thSemQPs must be categorized under Academics, got: {cat}");
+        for vp in &vpaths {
+            assert!(!vp.contains(".pdf/"), "Virtual path must not contain file extension as directory: {vp}");
+            assert!(vp.ends_with(file), "Virtual path must end with file name: {vp}");
+        }
+    }
+
+    #[test]
+    fn test_video_animation_never_categorized_as_code() {
+        let file = "madhav_title_animation.mp4";
+        let (cat, vpaths) = DynamicSemanticClassifier::classify("", file, &[], "mp4");
+        assert_ne!(cat, "Code", "Video animation must not be Code");
+        assert_ne!(cat, "Engineering", "Video animation must not be Engineering");
+        assert!(cat.starts_with("Media/"), "Video animation must be under Media, got: {cat}");
+        for vp in &vpaths {
+            assert!(vp.ends_with(file));
+        }
     }
 }

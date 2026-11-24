@@ -129,7 +129,7 @@ impl GalaxyLayout {
         self.node_index.clear();
 
         let hub_count = snapshot.hubs.len();
-        if hub_count == 0 {
+        if hub_count == 0 && snapshot.nodes.is_empty() {
             return;
         }
 
@@ -227,6 +227,30 @@ impl GalaxyLayout {
                     pos,
                     radius: 19.5,
                     capsule_mode,
+                });
+            }
+        }
+
+        // M12: Lay out any isolated or unmapped nodes
+        for node in &snapshot.nodes {
+            if !self.node_index.contains_key(&node.hash) {
+                let idx = self.nodes.len();
+                let angle = (idx as f32) * 2.3999632; // Golden angle in radians
+                let orbit = 110.0 + (idx as f32) * 32.0;
+                let pos = Pos2::new(angle.cos() * orbit, angle.sin() * orbit);
+                self.node_index.insert(node.hash.clone(), idx);
+                self.nodes.push(NodeLayout {
+                    hash: node.hash.clone(),
+                    file: node.file.clone(),
+                    category: node.category.clone(),
+                    file_type: node.file_type.clone(),
+                    keywords: node.keywords.clone(),
+                    size_bytes: node.size_bytes,
+                    file_exists: node.file_exists,
+                    accent: "#e59a54".to_string(),
+                    pos,
+                    radius: 19.5,
+                    capsule_mode: false,
                 });
             }
         }

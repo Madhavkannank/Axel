@@ -6,7 +6,7 @@ authors = ["Madhav Kannan K <madhavkannank@gmail.com>"]
 description = "AXEL: High-Performance Automated Document Extraction & Enhanced Labeling in Rust"
 license = "MIT"
 readme = "README.md"
-keywords = ["document-intelligence", "vector-space-model", "deduplication", "search", "xattr"]
+keywords = ["doc-intelligence", "vector-space-model", "deduplication", "search", "xattr"]
 categories = ["command-line-utilities", "filesystem", "text-processing"]
 
 [lib]
@@ -31,6 +31,7 @@ dotenvy = "0.15"
 regex = "1.10"
 colored = "2.1"
 axum = { version = "0.7", features = ["multipart"] }
+tokio-util = { version = "0.7", features = ["io"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 tower-http = { version = "0.5", features = ["cors"] }
 open = "5.3"
@@ -43,6 +44,7 @@ egui = "0.37"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal", "wayland"] }
 trash = "5.4"
 xattr = "1.7.0"
+getrandom = "0.2"
 
 [dev-dependencies]
 libc = "0.2"

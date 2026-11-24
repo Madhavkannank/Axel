@@ -42,6 +42,16 @@ impl FileMetadataTag {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        // H07: Validate schema version for large files (> 16MB).
+        // Legacy version 1 files used sparse head+mid+tail signatures rather than full SHA-256.
+        // If file > 16MB and user.axel.version != "2", reject cached xattr so normal scan re-indexes with full SHA-256.
+        let is_large_file = fs_metadata.len() > 16 * 1024 * 1024;
+        let version_tag = xattr::get(path, XATTR_VERSION).ok().flatten();
+        let is_version_2 = version_tag.as_deref() == Some(b"2");
+        if is_large_file && !is_version_2 {
+            return None;
+        }
+
         if let Some(mtime_bytes) = xattr::get(path, XATTR_MTIME).ok().flatten() {
             if let Ok(mtime_str) = std::str::from_utf8(&mtime_bytes) {
                 if let Ok(recorded_mtime) = mtime_str.trim().parse::<u64>() {

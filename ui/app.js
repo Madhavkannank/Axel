@@ -28,20 +28,41 @@
     lastFocusedEl: null,
   };
 
-  const apiToken = (() => {
+  let apiToken = (() => {
     const meta = document.querySelector('meta[name="axel-token"]');
     if (meta && meta.content) return meta.content;
-    const urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get('token') || '';
+    return sessionStorage.getItem('axel_session_token') || '';
   })();
 
-  function apiFetch(url, options = {}) {
+  async function apiFetch(url, options = {}) {
     const opts = { ...options };
     opts.headers = new Headers(opts.headers || {});
     if (apiToken && !opts.headers.has('Authorization')) {
       opts.headers.set('Authorization', `Bearer ${apiToken}`);
     }
-    return fetch(url, opts);
+    const res = await fetch(url, opts);
+    if (res.status === 401 && !url.includes('/api/auth/session')) {
+      const userKey = prompt('AXEL Authentication Required:\nPlease enter your API Key or session token:');
+      if (userKey) {
+        try {
+          const authRes = await fetch('/api/auth/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: userKey.trim() }),
+          });
+          if (authRes.ok) {
+            const authData = await authRes.json();
+            apiToken = authData.session_token;
+            sessionStorage.setItem('axel_session_token', apiToken);
+            opts.headers.set('Authorization', `Bearer ${apiToken}`);
+            return fetch(url, opts);
+          } else {
+            showToast('Authentication failed: Invalid token');
+          }
+        } catch (_) {}
+      }
+    }
+    return res;
   }
 
   const el = {
@@ -818,7 +839,7 @@
     }
 
     try {
-      const res = await apiFetch(`/api/search?q=${encodeURIComponent(q)}&limit=12`);
+      const res = await apiFetch(`/api/search?q=${encodeURIComponent(q)}`);
       const data = await res.json();
       state.searchMatches = new Map(data.results.map((r) => [r.item.hash, r]));
       el.searchSummary.textContent = `${data.total} semantic ${data.total === 1 ? 'match' : 'matches'} for "${q}"`;
@@ -878,9 +899,11 @@
       });
 
       el.modalDocPreview.textContent = data.text_preview || '(No extractable text content)';
-      let rawUrl = `/api/documents/${encodeURIComponent(hash)}/raw`;
-      if (apiToken) rawUrl += `?token=${encodeURIComponent(apiToken)}`;
-      el.btnDownloadRaw.href = rawUrl;
+      const rawUrl = `/api/documents/${encodeURIComponent(hash)}/raw`;
+      el.btnDownloadRaw.href = '#';
+      el.btnDownloadRaw.dataset.rawUrl = rawUrl;
+      el.btnDownloadRaw.dataset.hash = hash;
+      el.btnDownloadRaw.dataset.filename = item.file || 'document';
       el.btnDownloadRaw.classList.toggle('hidden', !data.file_exists);
       el.btnDeleteDoc.dataset.hash = hash;
       el.btnFocusInGalaxy.dataset.hash = hash;
@@ -925,7 +948,11 @@
     try {
       const res = await apiFetch('/api/scan', { method: 'POST' });
       const data = await res.json();
-      showToast(`Scan complete: ${data.indexed} indexed, ${data.skipped} unchanged`);
+      let msg = `Scan complete: ${data.indexed} indexed, ${data.skipped} unchanged`;
+      if (data.truncated) {
+        msg += ' (traversal truncated by directory ceiling)';
+      }
+      showToast(msg);
       await fetchGraphAndStats();
     } catch (err) {
       showToast(`Scan failed: ${err.message}`);
@@ -961,9 +988,7 @@
   }
 
   function connectSse() {
-    let sseUrl = '/api/events';
-    if (apiToken) sseUrl += `?token=${encodeURIComponent(apiToken)}`;
-    const es = new EventSource(sseUrl);
+    const es = new EventSource('/api/events');
     es.onmessage = (evt) => {
       try {
         const payload = JSON.parse(evt.data);
@@ -972,6 +997,9 @@
           if (payload.file) showToast(`Live Watcher indexed: ${payload.file}`);
         }
       } catch (_) {}
+    };
+    es.onerror = () => {
+      // Reconnect is handled automatically by EventSource
     };
   }
 
@@ -1166,6 +1194,28 @@
         state.camera.y = height / 2 - node.y;
         state.camera.zoom = 1.25;
         state.ripples.push({ x: node.x, y: node.y, baseRadius: 18, color: '#e59a54', start: performance.now() });
+      }
+    });
+
+    el.btnDownloadRaw.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const rawUrl = el.btnDownloadRaw.dataset.rawUrl;
+      const filename = el.btnDownloadRaw.dataset.filename || 'document';
+      if (!rawUrl || rawUrl === '#') return;
+      try {
+        const res = await apiFetch(rawUrl);
+        if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+      } catch (err) {
+        showToast(err.message);
       }
     });
 

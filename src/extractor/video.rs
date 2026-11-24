@@ -324,6 +324,15 @@ fn probe_container_headers(video_path: &Path) -> Result<VideoIntelligence, Strin
                     match k_lower.as_str() {
                         "title" => intel.title = Some(val_str.to_string()),
                         "description" | "comment" => intel.description = Some(val_str.to_string()),
+                        "encoder"
+                        | "major_brand"
+                        | "minor_version"
+                        | "compatible_brands"
+                        | "handler_name"
+                        | "vendor_id"
+                        | "creation_time" => {
+                            // Technical container header tags - skip to avoid polluting keywords or classification
+                        }
                         _ => {
                             if !val_str.trim().is_empty() && val_str.len() < 100 {
                                 intel.format_tags.push(format!("{k}: {val_str}"));

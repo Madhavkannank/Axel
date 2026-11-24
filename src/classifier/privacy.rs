@@ -234,16 +234,34 @@ pub fn redact_code_secrets_and_pii(input: &str) -> (String, bool) {
 pub fn sanitize_code_symbols(symbols: &[String]) -> Vec<String> {
     let forbidden_substrings = [
         "secret", "password", "passwd", "apikey", "api_key", "token", "private_key",
-        "redacted", "credential", "auth_token", "access_token",
+        "redacted", "credential", "auth_token", "access_token", "bearer", "auth",
     ];
     symbols
         .iter()
         .filter(|sym| {
             let lower = sym.to_lowercase();
-            !forbidden_substrings.iter().any(|&f| lower.contains(f))
+            if forbidden_substrings.iter().any(|&f| lower.contains(f)) {
+                return false;
+            }
+            let (_, has_secret) = redact_code_secrets_and_pii(sym);
+            if has_secret {
+                return false;
+            }
+            let (_, pii_summary) = redact_sensitive_pii(sym);
+            if pii_summary.total_redactions() > 0 {
+                return false;
+            }
+            true
         })
         .cloned()
         .collect()
+}
+
+/// Redacts secrets, credentials, and PII from filenames prior to outbound transmission (H10).
+pub fn redact_filename(file_name: &str) -> String {
+    let (sanitized_code, _) = redact_code_secrets_and_pii(file_name);
+    let (sanitized_pii, _) = redact_sensitive_pii(&sanitized_code);
+    sanitized_pii
 }
 
 /// Redact sensitive PII (Aadhaar, PAN, SSN, Credit Cards, Personal Names, Phone, DOB)

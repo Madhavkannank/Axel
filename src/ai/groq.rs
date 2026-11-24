@@ -60,7 +60,13 @@ impl GroqClient {
         }
     }
 
-    pub async fn categorize(&self, text: &str, candidate_kws: &[String]) -> Option<CategoryResult> {
+    pub async fn categorize(
+        &self,
+        text: &str,
+        file_name: &str,
+        file_type: &str,
+        candidate_kws: &[String],
+    ) -> Option<CategoryResult> {
         let (sanitized_text, _) = crate::classifier::redact_sensitive_pii(text);
         let text = sanitized_text.as_str();
 
@@ -79,24 +85,30 @@ impl GroqClient {
 
         let prompt = format!(
             "You are AXEL's semantic file intelligence engine. Analyze the following document text and metadata to determine:\n\
-            1. Constellation category: If it's an episodic web series or television video, output the Series Name (e.g. \"Dark\"). If it's course/study material, notes, or syllabus, output the Subject Name (e.g. \"Data Science\", \"Operating Systems\"). If it's a resume or CV, output \"Career/CV\" or \"Career/Resume\". Otherwise, output the specific domain topic (e.g. \"Finance\", \"Legal\", \"Code\", etc.). NEVER output generic tags like \"General\", \"Video\", or \"unrecognized_text\".\n\
+            File name: {}\n\
+            File type: {}\n\
+            1. Constellation category: If it's an episodic web series or television video, output the Series Name (e.g. \"Dark\"). If it's course/study material, notes, or syllabus, output the Subject or Topic Name (e.g. \"Data Science\", \"Operating Systems\", \"Calculus\"). If it's a resume or CV, output \"Career/CV\" or \"Career/Resume\". Otherwise, output the specific domain topic (e.g. \"Finance\", \"Legal\", \"Media\", etc.).\n\
+            IMPORTANT RULES:\n\
+            - Non-code media files (videos, animations, photos, audio, documents) must NEVER be categorized as \"Code\" or \"Engineering\" unless they are actual programming source files or developer scripts.\n\
+            - Academic question papers, semester exams, or study notes must be categorized by their academic subject or topic, NEVER as a raw number or ordinal like \"5th\".\n\
+            - NEVER output generic tags like \"General\", \"Video\", or \"unrecognized_text\".\n\
             2. Up to 5 descriptive semantic keywords (exclude common dialogue words or stop words)\n\
-            3. Dynamic virtual folder hierarchy paths where this file logically belongs. A single file can appear in multiple virtual folder paths simultaneously without duplicating bytes (for example: a series episode belongs to \"Dark/Dark S03E01.mkv\" and \"Series/Dark/Dark S03E01.mkv\"; a study notes document belongs to \"Data Science/Syllabus.pdf\" and \"Academics/Data Science/Syllabus.pdf\").\n\
+            3. Dynamic virtual folder hierarchy paths where this file logically belongs. A single file can appear in multiple virtual folder paths simultaneously without duplicating bytes (for example: a series episode belongs to \"Dark/{}\" and \"Series/Dark/{}\"; a study notes document belongs to \"Data Science/{}\" and \"Academics/Data Science/{}\"). Each virtual path must end with the file name itself, and intermediate directory names must never contain file extensions.\n\
             {}\n\
             You MUST output STRICT JSON in the following format ONLY:\n\
             {{\n\
               \"category\": \"...\",\n\
               \"keywords\": [\"...\", \"...\"],\n\
-              \"virtual_paths\": [\"Folder/Subfolder/Item\", \"Constellation/Item\"]\n\
+              \"virtual_paths\": [\"Folder/Subfolder/{}\", \"Category/{}\"]\n\
             }}\n\
             Do NOT output markdown backticks, explanations, or any other text.\n\n\
-            Text to analyze:\n{}",
-            kws_context, text
+            Content to analyze:\n{}",
+            file_name, file_type, file_name, file_name, file_name, file_name, kws_context, file_name, file_name, text
         );
 
         let stricter_prompt = format!(
-            "Your previous output failed JSON parsing. Return ONLY raw valid JSON with keys \"category\", \"keywords\", and \"virtual_paths\".\nText: {}",
-            text
+            "Your previous output failed JSON parsing. Return ONLY raw valid JSON with keys \"category\", \"keywords\", and \"virtual_paths\".\nFile name: {}\nContent: {}",
+            file_name, text
         );
 
         let mut models = vec![self.primary_model.clone()];

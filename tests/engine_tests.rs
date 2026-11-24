@@ -595,7 +595,7 @@ async fn test_api_security_loopback_and_boundary_enforcement() {
         ai,
         events_tx,
         session_token: session_token.clone(),
-        is_explicit_token: true,
+        api_token: None,
         is_remote: false,
     };
 
@@ -610,11 +610,17 @@ async fn test_api_security_loopback_and_boundary_enforcement() {
 
     let client = reqwest::Client::new();
 
-    // 2. GET / (UI) must serve HTML with injected session token meta tag
+    // 2. GET / (UI) must serve HTML with HttpOnly SameSite=Strict session cookie without leaking token in DOM
     let ui_res = client.get(&format!("{base_url}/")).send().await.unwrap();
     assert_eq!(ui_res.status(), reqwest::StatusCode::OK);
-    let ui_body = ui_res.text().await.unwrap();
-    assert!(ui_body.contains(r#"<meta name="axel-token" content="secure-test-token-999">"#));
+    let set_cookie = ui_res
+        .headers()
+        .get("set-cookie")
+        .expect("Must set session cookie")
+        .to_str()
+        .unwrap();
+    assert!(set_cookie.contains("axel_session="));
+    assert!(set_cookie.contains("HttpOnly"));
 
     // 3. Unauthenticated requests to mutating / sensitive endpoints MUST be rejected with 401
     let unauth_scan = client.post(&format!("{base_url}/api/scan")).send().await.unwrap();
@@ -629,7 +635,11 @@ async fn test_api_security_loopback_and_boundary_enforcement() {
     let unauth_raw = client.get(&format!("{base_url}/api/documents/somehash/raw")).send().await.unwrap();
     assert_eq!(unauth_raw.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-    // 4. Authenticated requests with Bearer, X-API-Key, or Query token succeed
+    // Query string token must be rejected (H01)
+    let query_auth = client.post(&format!("{base_url}/api/scan?token=secure-test-token-999")).send().await.unwrap();
+    assert_eq!(query_auth.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 4. Authenticated requests with Bearer or X-API-Key succeed
     let auth_scan = client
         .post(&format!("{base_url}/api/scan"))
         .header("Authorization", "Bearer secure-test-token-999")
@@ -665,9 +675,10 @@ async fn test_api_security_loopback_and_boundary_enforcement() {
         idx.upsert(valid_item);
     }
 
-    // 5a. Query token download for valid file inside workspace succeeds
+    // 5a. Authenticated download for valid file inside workspace succeeds
     let raw_res = client
-        .get(&format!("{base_url}/api/documents/{valid_hash}/raw?token=secure-test-token-999"))
+        .get(&format!("{base_url}/api/documents/{valid_hash}/raw"))
+        .header("Authorization", "Bearer secure-test-token-999")
         .send()
         .await
         .unwrap();
@@ -675,7 +686,7 @@ async fn test_api_security_loopback_and_boundary_enforcement() {
     let bytes = raw_res.bytes().await.unwrap();
     assert_eq!(bytes.as_ref(), b"Inside workspace content bytes");
 
-    // 5b. File OUTSIDE workspace must return 403 Forbidden even with valid token (H07)
+    // 5b. File OUTSIDE workspace must return 404 (not found / security abort) even with valid token (H02, M03)
     let outside_dir = std::env::temp_dir().join(format!("axel_outside_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&outside_dir);
     std::fs::create_dir_all(&outside_dir).unwrap();
@@ -697,20 +708,22 @@ async fn test_api_security_loopback_and_boundary_enforcement() {
     }
 
     let forbidden_res = client
-        .get(&format!("{base_url}/api/documents/{outside_hash}/raw?token=secure-test-token-999"))
+        .get(&format!("{base_url}/api/documents/{outside_hash}/raw"))
+        .header("Authorization", "Bearer secure-test-token-999")
         .send()
         .await
         .unwrap();
-    assert_eq!(forbidden_res.status(), reqwest::StatusCode::FORBIDDEN, "Accessing file outside workspace must return 403 Forbidden");
+    assert_eq!(forbidden_res.status(), reqwest::StatusCode::NOT_FOUND, "Accessing file outside workspace must be rejected");
 
-    // 5c. Tampered/modified file on disk must return 409 Conflict (H06)
+    // 5c. Tampered/modified file on disk must be rejected (M03)
     std::fs::write(&valid_file, b"Content modified on disk without indexing").unwrap();
     let tampered_res = client
-        .get(&format!("{base_url}/api/documents/{valid_hash}/raw?token=secure-test-token-999"))
+        .get(&format!("{base_url}/api/documents/{valid_hash}/raw"))
+        .header("Authorization", "Bearer secure-test-token-999")
         .send()
         .await
         .unwrap();
-    assert_eq!(tampered_res.status(), reqwest::StatusCode::CONFLICT, "Serving file with mismatched hash must return 409 Conflict");
+    assert_eq!(tampered_res.status(), reqwest::StatusCode::NOT_FOUND, "Serving file with mismatched hash must be rejected");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     let _ = std::fs::remove_dir_all(&outside_dir);
@@ -925,7 +938,7 @@ async fn test_search_total_and_limit_reporting() {
         ai,
         events_tx,
         session_token: "test-token".to_string(),
-        is_explicit_token: true,
+        api_token: Some("test-token".to_string()),
         is_remote: false,
     };
 
@@ -943,7 +956,8 @@ async fn test_search_total_and_limit_reporting() {
     // Query without explicit limit: should return results.len() == top_k_results (3),
     // but total == 10 (all 10 matching documents in the index)!
     let res = client
-        .get(&format!("{base_url}/api/search?q=invoice&token=test-token"))
+        .get(&format!("{base_url}/api/search?q=invoice"))
+        .header("Authorization", "Bearer test-token")
         .send()
         .await
         .unwrap();
@@ -956,6 +970,533 @@ async fn test_search_total_and_limit_reporting() {
     assert_eq!(total, 10, "Total must reflect total matches in index, not page slice length");
     assert_eq!(results.len(), 3, "Results length should default to config.top_k_results");
 }
+
+#[test]
+fn test_m04_same_hash_refresh_updates_category_and_virtual_paths() {
+    let mut index = DocumentIndex::new();
+    let initial = IndexItem::new(
+        "doc.txt".to_string(),
+        "Work/Old".to_string(),
+        vec!["old_kw".to_string()],
+        vec!["old_sym".to_string()],
+        "/workspace/doc.txt".to_string(),
+        "hash_123".to_string(),
+        vec!["virtual_old".to_string()],
+    );
+    index.upsert(initial.clone());
+
+    let doc = index.find_by_hash("hash_123").unwrap();
+    assert_eq!(doc.category, "Work/Old");
+    assert_eq!(doc.virtual_paths, initial.virtual_paths);
+    assert_eq!(doc.keywords, vec!["old_kw".to_string()]);
+
+    // Re-scan / refresh of same document with new category
+    let refreshed = IndexItem::new(
+        "doc.txt".to_string(),
+        "Work/New".to_string(),
+        vec!["new_kw".to_string()],
+        vec!["new_sym".to_string()],
+        "/workspace/doc.txt".to_string(),
+        "hash_123".to_string(),
+        vec!["virtual_new".to_string()],
+    );
+    index.upsert(refreshed.clone());
+
+    let doc_after = index.find_by_hash("hash_123").unwrap();
+    assert_eq!(doc_after.category, "Work/New", "M04: Category must be replaced on refresh");
+    assert_eq!(doc_after.virtual_paths, refreshed.virtual_paths, "M04: Virtual paths must be replaced on refresh");
+    assert_eq!(doc_after.keywords, vec!["new_kw".to_string()]);
+
+    // Duplicate registration at a different path
+    let duplicate = IndexItem::new(
+        "doc_copy.txt".to_string(),
+        "IgnoreCategory".to_string(),
+        vec!["ignore_kw".to_string()],
+        Vec::new(),
+        "/workspace/doc_copy.txt".to_string(),
+        "hash_123".to_string(),
+        vec!["ignore_vpath".to_string()],
+    );
+    index.upsert(duplicate);
+
+    let doc_dup = index.find_by_hash("hash_123").unwrap();
+    assert_eq!(doc_dup.category, "Work/New", "Duplicate registration must not overwrite primary metadata");
+    assert_eq!(doc_dup.virtual_paths, refreshed.virtual_paths);
+    assert!(doc_dup.is_duplicate);
+    assert_eq!(doc_dup.physical_paths.len(), 2);
+}
+
+#[tokio::test]
+async fn test_m03_raw_download_tries_physical_aliases_when_primary_missing() {
+    let temp_dir = std::env::temp_dir().join(format!("axel_m03_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let workspace = &temp_dir;
+
+    let primary_path = workspace.join("orig.txt");
+    let alias_path = workspace.join("alias.txt");
+
+    let content = b"Identical stream content across multiple physical aliases";
+    std::fs::write(&primary_path, content).unwrap();
+    std::fs::write(&alias_path, content).unwrap();
+
+    let hash = DocumentIndex::compute_file_hash(&primary_path).unwrap();
+
+    let mut item = IndexItem::new(
+        "orig.txt".to_string(),
+        "Documents".to_string(),
+        vec!["stream".to_string()],
+        Vec::new(),
+        primary_path.display().to_string(),
+        hash.clone(),
+        Vec::new(),
+    );
+    item.physical_paths.push(alias_path.display().to_string());
+    item.is_duplicate = true;
+
+    // Delete primary file from disk so only alias exists
+    std::fs::remove_file(&primary_path).unwrap();
+    assert!(!primary_path.exists());
+    assert!(alias_path.exists());
+
+    // M03: resolve_verified_document_path must not fail canonicalization on missing primary
+    let resolved = axel::engine::resolve_verified_document_path(&item, workspace);
+    assert!(resolved.is_some(), "M03: Must resolve live physical alias when primary is missing");
+    let resolved_path = resolved.unwrap();
+    assert_eq!(
+        std::fs::canonicalize(resolved_path).unwrap(),
+        std::fs::canonicalize(&alias_path).unwrap()
+    );
+
+    // Verify raw download endpoint streams the alias content
+    let mut config = Config::default();
+    config.input_folder = workspace.to_path_buf();
+
+    let mut index_data = DocumentIndex::new();
+    index_data.upsert(item);
+
+    let index = std::sync::Arc::new(tokio::sync::Mutex::new(index_data));
+    let ai = std::sync::Arc::new(axel::ai::AiEngine::new(&config));
+    let (events_tx, _) = tokio::sync::broadcast::channel::<String>(16);
+
+    let state = axel::server::AppState {
+        config: config.clone(),
+        index,
+        ai,
+        events_tx,
+        session_token: "test-token".to_string(),
+        api_token: Some("test-token".to_string()),
+        is_remote: false,
+    };
+
+    let app = axel::server::create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(&format!("{base_url}/api/documents/{hash}/raw"))
+        .header("Authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    let downloaded_bytes = res.bytes().await.unwrap();
+    assert_eq!(downloaded_bytes.as_ref(), content);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_m02_upload_3_18_mib_file_succeeds() {
+    let temp_dir = std::env::temp_dir().join(format!("axel_m02_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let workspace = &temp_dir;
+
+    let mut config = Config::default();
+    config.input_folder = workspace.to_path_buf();
+    config.index_file = workspace.join("index.json");
+
+    let index = std::sync::Arc::new(tokio::sync::Mutex::new(DocumentIndex::load(&config.index_file)));
+    let ai = std::sync::Arc::new(axel::ai::AiEngine::new(&config));
+    let (events_tx, _) = tokio::sync::broadcast::channel::<String>(16);
+
+    let state = axel::server::AppState {
+        config: config.clone(),
+        index,
+        ai,
+        events_tx,
+        session_token: "test-token".to_string(),
+        api_token: Some("test-token".to_string()),
+        is_remote: false,
+    };
+
+    let app = axel::server::create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Generate a 3.5 MB file (which fails default Axum 2MB body limit)
+    let payload_size = (3.5 * 1024.0 * 1024.0) as usize;
+    let large_payload = vec![b'A'; payload_size];
+
+    let boundary = "------------------------boundary1234567890";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"large_upload.txt\"\r\n");
+    body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+    body.extend_from_slice(&large_payload);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(&format!("{base_url}/api/upload"))
+        .header("Authorization", "Bearer test-token")
+        .header("Content-Type", format!("multipart/form-data; boundary={boundary}"))
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        reqwest::StatusCode::OK,
+        "M02: 3.5 MB upload must succeed without hitting Axum 2MB default body limit"
+    );
+
+    let res_body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(res_body["count"].as_u64().unwrap(), 1);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_h07_large_file_legacy_hash_migration() {
+    let temp_dir = std::env::temp_dir().join(format!("axel_h07_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let file_path = temp_dir.join("large_legacy.bin");
+
+    // Create a 17 MB file
+    let size = 17 * 1024 * 1024;
+    let file = std::fs::File::create(&file_path).unwrap();
+    file.set_len(size as u64).unwrap();
+
+    let full_sha256 = DocumentIndex::compute_file_hash(&file_path).unwrap();
+    let legacy_sparse_hash = "legacy_sparse_hash_v1_dummy".to_string();
+
+    // Stamp with legacy version 1 xattrs
+    let _ = xattr::set(&file_path, axel::index::metadata::XATTR_CATEGORY, b"Documents/Large");
+    let _ = xattr::set(&file_path, axel::index::metadata::XATTR_HASH, legacy_sparse_hash.as_bytes());
+    let _ = xattr::set(&file_path, axel::index::metadata::XATTR_VERSION, b"1");
+
+    // H07: read_from_file must reject cached xattr for files > 16MB when version != "2"
+    let read_tagged = axel::index::metadata::FileMetadataTag::read_from_file(&file_path);
+    assert!(read_tagged.is_none(), "H07: Must reject legacy sparse hash on files > 16MB");
+
+    // Create index JSON referencing legacy hash
+    let index_file = temp_dir.join("index.json");
+    let initial_items = vec![IndexItem::new(
+        "large_legacy.bin".to_string(),
+        "Documents/Large".to_string(),
+        vec!["large".to_string()],
+        Vec::new(),
+        file_path.display().to_string(),
+        legacy_sparse_hash,
+        Vec::new(),
+    )];
+    std::fs::write(&index_file, serde_json::to_string(&initial_items).unwrap()).unwrap();
+
+    // Load index - must auto-migrate legacy large file to full SHA-256 and version 2
+    let loaded_index = DocumentIndex::load(&index_file);
+    let migrated_item = loaded_index.find_by_hash(&full_sha256);
+    assert!(migrated_item.is_some(), "H07: DocumentIndex::load must migrate large legacy file to full SHA-256");
+
+    let v_tag = xattr::get(&file_path, axel::index::metadata::XATTR_VERSION).ok().flatten();
+    assert_eq!(v_tag.as_deref(), Some(&b"2"[..]), "H07: Migration must stamp user.axel.version = 2");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_m05_duplicate_tracking_and_deletion_reconciliation() {
+    let mut index = DocumentIndex::new();
+    let hash = "hash_m05_test";
+    let p1 = "/workspace/folder_a/report.pdf";
+    let p2 = "/workspace/folder_b/report_copy.pdf";
+
+    let mut item = IndexItem::new(
+        "report.pdf".to_string(),
+        "Finance".to_string(),
+        vec!["financial".to_string()],
+        Vec::new(),
+        p1.to_string(),
+        hash.to_string(),
+        Vec::new(),
+    );
+    item.physical_paths = vec![p1.to_string(), p2.to_string()];
+    item.is_duplicate = true;
+    index.upsert(item);
+
+    assert_eq!(index.count(), 1);
+    let entry = index.find_by_hash(hash).unwrap();
+    assert_eq!(entry.path, p1);
+    assert_eq!(entry.physical_paths.len(), 2);
+    assert!(entry.is_duplicate);
+
+    // Reconcile deletion of primary path p1
+    let modified = index.remove_path(p1);
+    assert!(modified, "M05: remove_path must return true when matching physical path is removed");
+
+    let entry_after = index.find_by_hash(hash).unwrap();
+    assert_eq!(entry_after.path, p2, "M05: Surviving alias must be promoted to primary path");
+    assert_eq!(entry_after.file, "report_copy.pdf");
+    assert_eq!(entry_after.physical_paths.len(), 1);
+    assert!(!entry_after.is_duplicate, "M05: Single remaining path is no longer duplicate");
+
+    // Reconcile deletion of remaining path p2
+    let modified_last = index.remove_path(p2);
+    assert!(modified_last, "M05: remove_path must succeed on last copy");
+    assert_eq!(index.count(), 0, "M05: Document must be dropped when all copies are deleted");
+    assert!(index.find_by_hash(hash).is_none());
+}
+
+#[tokio::test]
+async fn test_m06_search_limit_honors_down_to_one() {
+    let mut config = Config::default();
+    config.top_k_results = 10;
+
+    let mut index_data = DocumentIndex::new();
+    for i in 0..5 {
+        let item = IndexItem::new(
+            format!("doc_{i}.txt"),
+            "Docs".to_string(),
+            vec!["target".to_string()],
+            Vec::new(),
+            format!("/workspace/doc_{i}.txt"),
+            format!("hash_m06_{i}"),
+            Vec::new(),
+        );
+        index_data.upsert(item);
+    }
+
+    let index = std::sync::Arc::new(tokio::sync::Mutex::new(index_data));
+    let ai = std::sync::Arc::new(axel::ai::AiEngine::new(&config));
+    let (events_tx, _) = tokio::sync::broadcast::channel::<String>(16);
+
+    let state = axel::server::AppState {
+        config: config.clone(),
+        index,
+        ai,
+        events_tx,
+        session_token: "test-token".to_string(),
+        api_token: Some("test-token".to_string()),
+        is_remote: false,
+    };
+
+    let app = axel::server::create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(&format!("{base_url}/api/search?q=target&limit=1"))
+        .header("Authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = res.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "M06: Limit=1 must be strictly honored without floor of 12");
+}
+
+#[test]
+fn test_m07_dot_directory_include_overrides() {
+    std::env::set_var("AXEL_INCLUDE_DIRS", ".github,.notes,.config");
+
+    // Overridden dot-directories should NOT be skipped
+    assert!(!axel::classifier::filter::should_skip_directory(".github"));
+    assert!(!axel::classifier::filter::should_skip_directory(".notes"));
+    assert!(!axel::classifier::filter::should_skip_directory(".config"));
+
+    // Standard ignored dot-directories and build folders should still be skipped
+    assert!(axel::classifier::filter::should_skip_directory(".git"));
+    assert!(axel::classifier::filter::should_skip_directory(".cache"));
+    assert!(axel::classifier::filter::should_skip_directory("node_modules"));
+
+    std::env::remove_var("AXEL_INCLUDE_DIRS");
+}
+
+#[test]
+fn test_m10_multilingual_unicode_combining_marks_and_keyword_limit() {
+    use axel::classifier::nlp::{stem, tokenize};
+    use axel::classifier::keywords::KeywordExtractor;
+
+    // Test Devanagari script combining marks: नमस्ते (na + ma + sa + virama + te)
+    let devanagari = "नमस्ते भारत सरकार";
+    let tokens = tokenize(devanagari);
+    assert!(!tokens.is_empty(), "M10: Devanagari tokens must not be stripped");
+
+    // Test European accented marks
+    let accented = "résumé café naïve";
+    let tokens_acc = tokenize(accented);
+    assert!(!tokens_acc.is_empty(), "M10: Accented characters must be preserved");
+
+    // Test stem function on European input does not panic
+    let stemmed = stem("cafés");
+    assert!(!stemmed.is_empty());
+
+    // Test keyword extraction respecting custom max_keywords
+    let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron";
+    let kws = KeywordExtractor::new().extract(text, 3);
+    assert!(kws.len() <= 3, "M10: Keyword extraction must strictly respect max_keywords limit");
+}
+
+#[test]
+fn test_m11_modern_script_types_and_docx_entities() {
+    use axel::extractor::{detect_file_type, FileType};
+    use axel::extractor::docx::decode_xml_entities;
+    use std::path::Path;
+
+    // Modern script detection
+    assert_eq!(detect_file_type(Path::new("index.mjs")), FileType::Text);
+    assert_eq!(detect_file_type(Path::new("bundle.cjs")), FileType::Text);
+    assert_eq!(detect_file_type(Path::new("script.lua")), FileType::Text);
+    assert_eq!(detect_file_type(Path::new("app.rb")), FileType::Text);
+    assert_eq!(detect_file_type(Path::new("index.php")), FileType::Text);
+    assert_eq!(detect_file_type(Path::new("analysis.r")), FileType::Text);
+    assert_eq!(detect_file_type(Path::new("MainActivity.kt")), FileType::Text);
+    assert_eq!(detect_file_type(Path::new("App.swift")), FileType::Text);
+    assert_eq!(detect_file_type(Path::new("tool.pl")), FileType::Text);
+
+    // XML entity decoding
+    let raw_xml = "Tom &amp; Jerry &quot;Show&quot; &lt;Episode 1&gt; &#169; 2026 &#x21; &nbsp;";
+    let decoded = decode_xml_entities(raw_xml);
+    assert!(decoded.contains("Tom & Jerry"));
+    assert!(decoded.contains("\"Show\""));
+    assert!(decoded.contains("<Episode 1>"));
+    assert!(decoded.contains("©"));
+    assert!(decoded.contains("!"));
+}
+
+#[test]
+fn test_m12_isolated_node_layout() {
+    use axel::desktop::galaxy::GalaxyLayout;
+    use axel::engine::{GraphHub, GraphNode, GraphSnapshot};
+
+    let mut snapshot = GraphSnapshot::default();
+    // Hub exists for "Code"
+    snapshot.hubs.push(GraphHub {
+        id: "Code".to_string(),
+        category: "Code".to_string(),
+        count: 1,
+        top_keywords: vec!["rust".to_string()],
+        accent: "#6366f1".to_string(),
+    });
+
+    // Node 1 is in "Code"
+    snapshot.nodes.push(GraphNode {
+        hash: "hash_code".to_string(),
+        file: "main.rs".to_string(),
+        category: "Code".to_string(),
+        file_type: "code".to_string(),
+        keywords: vec!["rust".to_string()],
+        path: "/workspace/main.rs".to_string(),
+        indexed_at: None,
+        size_bytes: Some(1024),
+        file_exists: true,
+    });
+
+    // Node 2 has unmapped/isolated category "UnknownOrphan"
+    snapshot.nodes.push(GraphNode {
+        hash: "hash_orphan".to_string(),
+        file: "isolated.xyz".to_string(),
+        category: "UnknownOrphan".to_string(),
+        file_type: "unknown".to_string(),
+        keywords: vec!["orphan".to_string()],
+        path: "/workspace/isolated.xyz".to_string(),
+        indexed_at: None,
+        size_bytes: Some(512),
+        file_exists: true,
+    });
+
+    let mut layout = GalaxyLayout::default();
+    layout.rebuild(&snapshot);
+
+    assert_eq!(layout.nodes.len(), 2, "M12: Isolated nodes must be included in galaxy layout");
+    assert!(layout.node_index.contains_key("hash_orphan"));
+    assert!(layout.node_index.contains_key("hash_code"));
+}
+
+#[test]
+fn test_ui_index_html_supported_upload_types() {
+    let html = include_str!("../ui/index.html");
+    assert!(html.contains(".mjs"), "ui/index.html must accept modern script formats");
+    assert!(html.contains(".lua"), "ui/index.html must accept lua");
+    assert!(html.contains(".odt"), "ui/index.html must accept odt");
+}
+
+#[tokio::test]
+async fn test_ai_categorization_guardrails_media_and_ordinals() {
+    let mut config = Config::load();
+    config.groq_api_key = None;
+    let ai = AiEngine::new(&config);
+
+    // 1. Video animation must never be categorized as Code
+    let video_res = ai
+        .analyze_document(
+            "format: mp4, title: Title Animation, resolution: 1920x1080",
+            "madhav_title_animation.mp4",
+            None,
+        )
+        .await;
+    assert_ne!(video_res.category, "Code", "Video must not be Code");
+    assert_ne!(video_res.category, "Engineering", "Video must not be Engineering");
+    assert!(video_res.category.starts_with("Media/"), "Video must be Media, got: {}", video_res.category);
+    for kw in &video_res.keywords {
+        assert_ne!(kw, "encoder");
+        assert_ne!(kw, "isom");
+        assert_ne!(kw, "compatible_brands");
+    }
+
+    // 2. 5thSemQPs.pdf must never be categorized as "5th"
+    let qps_res = ai
+        .analyze_document(
+            "",
+            "5thSemQPs.pdf",
+            None,
+        )
+        .await;
+    assert_ne!(qps_res.category, "5th", "Category must not be raw ordinal '5th'");
+    assert!(
+        qps_res.category.starts_with("Academics/"),
+        "5thSemQPs.pdf must be under Academics, got: {}",
+        qps_res.category
+    );
+    for vp in &qps_res.virtual_paths {
+        assert!(!vp.contains(".pdf/"), "Virtual path must not treat .pdf as folder: {vp}");
+        assert!(vp.ends_with("5thSemQPs.pdf"));
+    }
+}
+
 
 
 

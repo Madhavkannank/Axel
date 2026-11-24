@@ -32,6 +32,21 @@ pub struct IndexItem {
 }
 
 impl IndexItem {
+    pub fn empty() -> Self {
+        Self {
+            file: String::new(),
+            category: String::new(),
+            keywords: Vec::new(),
+            symbols: Vec::new(),
+            path: String::new(),
+            hash: String::new(),
+            indexed_at: Some(chrono::Utc::now().to_rfc3339()),
+            virtual_paths: Vec::new(),
+            physical_paths: Vec::new(),
+            is_duplicate: false,
+        }
+    }
+
     pub fn new(
         file: String,
         category: String,
@@ -79,6 +94,9 @@ pub struct DocumentIndex {
     file_path: PathBuf,
     items: Vec<IndexItem>,
     dirty: bool,
+    initial_items_hashes: std::collections::HashSet<String>,
+    deleted_hashes: std::collections::HashSet<String>,
+    recovered_from_backup: bool,
 }
 
 impl Default for DocumentIndex {
@@ -90,6 +108,9 @@ impl Default for DocumentIndex {
 impl DocumentIndex {
     pub fn load<P: AsRef<Path>>(index_path: P) -> Self {
         let file_path = index_path.as_ref().to_path_buf();
+        let bak_path = format!("{}.bak", file_path.display());
+        let mut recovered_from_backup = false;
+
         let raw_items: Vec<IndexItem> = if file_path.exists() {
             match std::fs::read_to_string(&file_path) {
                 Ok(content) => match serde_json::from_str::<Vec<IndexItem>>(&content) {
@@ -99,7 +120,6 @@ impl DocumentIndex {
                             "[Index] Warning: Failed to parse index JSON at {}: {err}. Attempting recovery from backup...",
                             file_path.display()
                         );
-                        let bak_path = format!("{}.bak", file_path.display());
                         if let Ok(bak_content) = std::fs::read_to_string(&bak_path) {
                             match serde_json::from_str::<Vec<IndexItem>>(&bak_content) {
                                 Ok(items) => {
@@ -108,6 +128,7 @@ impl DocumentIndex {
                                         items.len(),
                                         bak_path
                                     );
+                                    recovered_from_backup = true;
                                     items
                                 }
                                 Err(bak_err) => {
@@ -122,18 +143,51 @@ impl DocumentIndex {
                 },
                 Err(err) => {
                     eprintln!(
-                        "[Index] Warning: Failed to read index file at {}: {err}",
+                        "[Index] Warning: Failed to read index file at {}: {err}. Attempting recovery from backup...",
                         file_path.display()
                     );
-                    Vec::new()
+                    if let Ok(bak_content) = std::fs::read_to_string(&bak_path) {
+                        match serde_json::from_str::<Vec<IndexItem>>(&bak_content) {
+                            Ok(items) => {
+                                eprintln!(
+                                    "[Index] Successfully recovered {} items from backup: {}",
+                                    items.len(),
+                                    bak_path
+                                );
+                                recovered_from_backup = true;
+                                items
+                            }
+                            Err(_) => Vec::new(),
+                        }
+                    } else {
+                        Vec::new()
+                    }
                 }
+            }
+        } else if std::path::Path::new(&bak_path).exists() {
+            // H06: Primary missing on disk; recover from valid backup
+            if let Ok(bak_content) = std::fs::read_to_string(&bak_path) {
+                match serde_json::from_str::<Vec<IndexItem>>(&bak_content) {
+                    Ok(items) => {
+                        eprintln!(
+                            "[Index] Primary file missing; recovered {} items from backup: {}",
+                            items.len(),
+                            bak_path
+                        );
+                        recovered_from_backup = true;
+                        items
+                    }
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                Vec::new()
             }
         } else {
             Vec::new()
         };
 
         // Filter out any legacy or invalid "General" items so they are properly re-indexed with dynamic tags
-        let items: Vec<IndexItem> = raw_items
+        let mut items: Vec<IndexItem> = raw_items
             .into_iter()
             .filter(|item| {
                 let cat = item.category.trim();
@@ -143,18 +197,58 @@ impl DocumentIndex {
             })
             .collect();
 
+        // H07: Versioned hash migration covering both JSON index and extended attributes.
+        // If an indexed item references a file > 16MB on disk that lacks version 2 xattr,
+        // recompute full SHA-256 and update xattrs and index record.
+        let mut migrated_any = false;
+        for item in &mut items {
+            let p = Path::new(&item.path);
+            if p.is_file() {
+                if let Ok(meta) = std::fs::metadata(p) {
+                    if meta.len() > 16 * 1024 * 1024 {
+                        let version_tag = xattr::get(p, crate::index::metadata::XATTR_VERSION).ok().flatten();
+                        let is_v2 = version_tag.as_deref() == Some(b"2");
+                        if !is_v2 {
+                            if let Some(new_hash) = Self::compute_file_hash(p) {
+                                if new_hash != item.hash {
+                                    item.hash = new_hash.clone();
+                                    migrated_any = true;
+                                }
+                                let _ = crate::index::metadata::FileMetadataTag::write_to_file(
+                                    p,
+                                    &item.category,
+                                    &item.keywords,
+                                    &item.virtual_paths,
+                                    &item.hash,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let initial_items_hashes = items.iter().map(|i| i.hash.clone()).collect();
+
         Self {
             file_path,
             items,
-            dirty: false,
+            dirty: recovered_from_backup || migrated_any,
+            initial_items_hashes,
+            deleted_hashes: std::collections::HashSet::new(),
+            recovered_from_backup,
         }
     }
 
     pub fn from_items(items: Vec<IndexItem>) -> Self {
+        let initial_items_hashes = items.iter().map(|i| i.hash.clone()).collect();
         Self {
             file_path: PathBuf::new(),
             items,
             dirty: false,
+            initial_items_hashes,
+            deleted_hashes: std::collections::HashSet::new(),
+            recovered_from_backup: false,
         }
     }
 
@@ -207,68 +301,100 @@ impl DocumentIndex {
             item.physical_paths.push(item.path.clone());
         }
 
-        let item_resolved = resolve_workspace_path(Path::new(&item.path));
-        if let Some(pos) = self.items.iter().position(|i| i.hash == item.hash) {
-            let existing = &mut self.items[pos];
-            let new_path = item.path.clone();
+        // Canonical/resolved paths claimed by this item
+        let claimed_paths: Vec<PathBuf> = item
+            .physical_paths
+            .iter()
+            .map(|p| resolve_workspace_path(Path::new(p)))
+            .collect();
 
-            // Track duplicate physical download locations
-            if !existing.physical_paths.contains(&new_path) {
-                existing.physical_paths.push(new_path);
-                existing.is_duplicate = true;
-            }
-
-            // Merge virtual paths
-            for vp in item.virtual_paths {
-                if !existing.virtual_paths.contains(&vp) {
-                    existing.virtual_paths.push(vp);
-                }
-            }
-
-            // Update category and keywords if new item has richer metadata
-            if item.keywords.len() > existing.keywords.len() {
-                existing.keywords = item.keywords;
-            }
-            if !item.symbols.is_empty() && existing.symbols.is_empty() {
-                existing.symbols = item.symbols;
-            }
-        } else if let Some(pos) = self.items.iter().position(|i| {
-            i.path == item.path || resolve_workspace_path(Path::new(&i.path)) == item_resolved
-        }) {
-            // M01: If existing item has multiple physical aliases and only one copy was modified,
-            // preserve the index entry for the unmodified copies!
-            let existing = &mut self.items[pos];
-            if existing.physical_paths.len() > 1 {
-                let path_to_remove = item.path.clone();
-                existing.physical_paths.retain(|p| {
-                    p != &path_to_remove && resolve_workspace_path(Path::new(p)) != item_resolved
+        // H08: Maintain unique path ownership across ALL records.
+        // If any OTHER record claims any of these paths, relinquish ownership atomically.
+        let mut idx = 0;
+        while idx < self.items.len() {
+            if self.items[idx].hash != item.hash {
+                let other = &mut self.items[idx];
+                let before_len = other.physical_paths.len();
+                other.physical_paths.retain(|p| {
+                    let r = resolve_workspace_path(Path::new(p));
+                    !claimed_paths.contains(&r)
                 });
-                existing.is_duplicate = existing.physical_paths.len() > 1;
-                if existing.path == path_to_remove
-                    || resolve_workspace_path(Path::new(&existing.path)) == item_resolved
-                {
-                    if let Some(next_p) = existing.physical_paths.first().cloned() {
-                        if let Some(fname) =
-                            Path::new(&next_p).file_name().and_then(|s| s.to_str())
-                        {
-                            existing.file = fname.to_string();
+
+                if other.physical_paths.len() < before_len {
+                    if other.physical_paths.is_empty() {
+                        // All physical paths moved to the new record; drop the empty record
+                        self.items.remove(idx);
+                        continue;
+                    } else {
+                        // Promote remaining alias if primary was claimed
+                        let primary_resolved = resolve_workspace_path(Path::new(&other.path));
+                        if claimed_paths.contains(&primary_resolved) {
+                            if let Some(next_p) = other.physical_paths.first().cloned() {
+                                if let Some(fname) =
+                                    Path::new(&next_p).file_name().and_then(|s| s.to_str())
+                                {
+                                    other.file = fname.to_string();
+                                }
+                                other.path = next_p;
+                            }
                         }
-                        existing.path = next_p;
+                        other.is_duplicate = other.physical_paths.len() > 1;
                     }
                 }
-                self.items.push(item);
-            } else {
-                self.items[pos] = item;
             }
+            idx += 1;
+        }
+
+        // Now update or insert the item under its hash
+        if let Some(pos) = self.items.iter().position(|i| i.hash == item.hash) {
+            let existing = &mut self.items[pos];
+
+            // M04: Separate metadata replacement from duplicate registration.
+            // Check if this upsert is a refresh of the existing primary document or an existing copy.
+            let is_refresh = existing.path == item.path
+                || resolve_workspace_path(Path::new(&existing.path))
+                    == resolve_workspace_path(Path::new(&item.path))
+                || existing.physical_paths.iter().any(|ep| {
+                    resolve_workspace_path(Path::new(ep))
+                        == resolve_workspace_path(Path::new(&item.path))
+                })
+                || existing.physical_paths.is_empty();
+
+            if is_refresh {
+                // Metadata refresh: replace category, keywords, symbols, and virtual paths
+                if !item.category.trim().is_empty() {
+                    existing.category = item.category;
+                }
+                if !item.keywords.is_empty() {
+                    existing.keywords = item.keywords;
+                }
+                if !item.symbols.is_empty() {
+                    existing.symbols = item.symbols;
+                }
+                if !item.virtual_paths.is_empty() {
+                    existing.virtual_paths = item.virtual_paths;
+                }
+            }
+
+            // Register any new physical paths
+            for p in item.physical_paths {
+                let p_res = resolve_workspace_path(Path::new(&p));
+                if !existing.physical_paths.iter().any(|ep| resolve_workspace_path(Path::new(ep)) == p_res) {
+                    existing.physical_paths.push(p);
+                }
+            }
+            existing.is_duplicate = existing.physical_paths.len() > 1;
         } else {
             self.items.push(item);
         }
+
         self.dirty = true;
     }
 
     pub fn remove_by_hash(&mut self, hash: &str) -> Option<IndexItem> {
         if let Some(pos) = self.items.iter().position(|i| i.hash == hash) {
             let removed = self.items.remove(pos);
+            self.deleted_hashes.insert(hash.to_string());
             self.dirty = true;
             Some(removed)
         } else {
@@ -286,6 +412,7 @@ impl DocumentIndex {
             if self.items[pos].physical_paths.len() < before {
                 if self.items[pos].physical_paths.is_empty() {
                     self.items.remove(pos);
+                    self.deleted_hashes.insert(hash.to_string());
                 } else {
                     self.items[pos].is_duplicate = self.items[pos].physical_paths.len() > 1;
                     let current_primary_resolved =
@@ -303,6 +430,70 @@ impl DocumentIndex {
                         }
                     }
                 }
+                self.dirty = true;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Reconciles deletion of a file at `path` across all records.
+    /// If surviving physical aliases exist, promotes one to primary path.
+    /// If no aliases remain, removes the document record entirely from the index (M05).
+    pub fn remove_path<P: AsRef<Path>>(&mut self, path: P) -> bool {
+        let p = path.as_ref();
+        let p_str = p.to_string_lossy();
+        let p_resolved = resolve_workspace_path(p);
+        let mut modified = false;
+
+        let mut idx = 0;
+        while idx < self.items.len() {
+            let matches_primary = self.items[idx].path == p_str.as_ref()
+                || resolve_workspace_path(Path::new(&self.items[idx].path)) == p_resolved;
+            let has_in_physical = self.items[idx].physical_paths.iter().any(|pp| {
+                pp == p_str.as_ref() || resolve_workspace_path(Path::new(pp)) == p_resolved
+            });
+
+            if matches_primary || has_in_physical {
+                let hash = self.items[idx].hash.clone();
+                self.items[idx].physical_paths.retain(|pp| {
+                    pp != p_str.as_ref() && resolve_workspace_path(Path::new(pp)) != p_resolved
+                });
+
+                if self.items[idx].physical_paths.is_empty() {
+                    self.items.remove(idx);
+                    self.deleted_hashes.insert(hash);
+                    modified = true;
+                    continue;
+                } else {
+                    self.items[idx].is_duplicate = self.items[idx].physical_paths.len() > 1;
+                    if matches_primary {
+                        if let Some(next_p) = self.items[idx].physical_paths.first().cloned() {
+                            if let Some(fname) = Path::new(&next_p).file_name().and_then(|s| s.to_str()) {
+                                self.items[idx].file = fname.to_string();
+                            }
+                            self.items[idx].path = next_p;
+                        }
+                    }
+                    modified = true;
+                }
+            }
+            idx += 1;
+        }
+
+        if modified {
+            self.dirty = true;
+        }
+        modified
+    }
+
+    /// Registers a duplicate physical path as an alias in an existing document record (M05).
+    pub fn add_physical_alias(&mut self, hash: &str, path: &str) -> bool {
+        let p_resolved = resolve_workspace_path(Path::new(path));
+        if let Some(item) = self.items.iter_mut().find(|i| i.hash == hash) {
+            if !item.physical_paths.iter().any(|p| resolve_workspace_path(Path::new(p)) == p_resolved) {
+                item.physical_paths.push(path.to_string());
+                item.is_duplicate = item.physical_paths.len() > 1;
                 self.dirty = true;
                 return true;
             }
@@ -348,10 +539,47 @@ impl DocumentIndex {
             }
         }
 
+        // H05: Reconcile with on-disk state to prevent lost updates from concurrent writers/handles
+        if self.file_path.exists() {
+            if let Ok(disk_content) = std::fs::read_to_string(&self.file_path) {
+                if let Ok(disk_items) = serde_json::from_str::<Vec<IndexItem>>(&disk_content) {
+                    for disk_item in disk_items {
+                        // If we explicitly deleted this hash, do not revive it
+                        if self.deleted_hashes.contains(&disk_item.hash) {
+                            continue;
+                        }
+
+                        if let Some(pos) = self.items.iter().position(|i| i.hash == disk_item.hash) {
+                            // Merge physical paths that another writer added
+                            let local = &mut self.items[pos];
+                            for dp in disk_item.physical_paths {
+                                let dp_res = resolve_workspace_path(Path::new(&dp));
+                                if !local.physical_paths.iter().any(|lp| resolve_workspace_path(Path::new(lp)) == dp_res) {
+                                    local.physical_paths.push(dp);
+                                }
+                            }
+                            local.is_duplicate = local.physical_paths.len() > 1;
+
+                            // Merge virtual paths
+                            for dvp in disk_item.virtual_paths {
+                                if !local.virtual_paths.contains(&dvp) {
+                                    local.virtual_paths.push(dvp);
+                                }
+                            }
+                        } else if !self.initial_items_hashes.contains(&disk_item.hash) {
+                            // An independent handle/writer inserted this item while self was open!
+                            // Preserve the concurrent update without dropping it.
+                            self.items.push(disk_item);
+                        }
+                    }
+                }
+            }
+        }
+
         let json = serde_json::to_string_pretty(&self.items)
             .map_err(std::io::Error::other)?;
 
-        // H08: Atomic persistence with fsync and crash-recovery backup
+        // Atomic persistence with fsync and crash-recovery backup
         static SAVE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let count = SAVE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = std::time::SystemTime::now()
@@ -378,9 +606,17 @@ impl DocumentIndex {
             file.sync_all()?;
         }
 
+        // H06: Preserve validated backup generations.
+        // NEVER overwrite a valid backup with a corrupt primary!
         if self.file_path.exists() {
-            let bak_path = format!("{}.bak", self.file_path.display());
-            let _ = std::fs::copy(&self.file_path, &bak_path);
+            let primary_is_valid = match std::fs::read_to_string(&self.file_path) {
+                Ok(content) => serde_json::from_str::<serde_json::Value>(&content).is_ok(),
+                Err(_) => false,
+            };
+            if primary_is_valid {
+                let bak_path = format!("{}.bak", self.file_path.display());
+                let _ = std::fs::copy(&self.file_path, &bak_path);
+            }
         }
 
         if let Err(e) = std::fs::rename(&temp_path, &self.file_path) {
@@ -388,7 +624,10 @@ impl DocumentIndex {
             return Err(e);
         }
 
+        self.initial_items_hashes = self.items.iter().map(|i| i.hash.clone()).collect();
+        self.deleted_hashes.clear();
         self.dirty = false;
+        self.recovered_from_backup = false;
         Ok(())
     }
 

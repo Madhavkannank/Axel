@@ -56,8 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(p) = port {
                             config.port = p;
                         }
-                        if host != "127.0.0.1" || config.host == "127.0.0.1" {
-                            config.host = host;
+                        if let Some(h) = host {
+                            config.host = h;
                         }
                         if let Some(t) = token {
                             config.api_token = Some(t);
@@ -65,7 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         server::run_server(config, !no_open).await?;
                     }
                     Commands::Check => {
-                        run_check(&config).await;
+                        let ok = run_check(&config).await;
+                        if !ok {
+                            std::process::exit(1);
+                        }
                     }
                     Commands::Ui { .. } => unreachable!(),
                 }
@@ -178,49 +181,64 @@ async fn run_watch(target_dir: &Path, config: &Config) -> Result<(), Box<dyn std
     let ai = AiEngine::new(config);
 
     loop {
-        if let Some(path) = watcher.poll_next_file() {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if let Some(event) = watcher.poll_next_event() {
+            match event {
+                axel::watcher::WatchEvent::CreatedOrModified(path) => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-            let file_name = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("document")
-                .to_string();
+                    let file_name = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("document")
+                        .to_string();
 
-            if let Some(hash) = DocumentIndex::compute_file_hash(&path) {
-                let path_str = path.display().to_string();
-                if let Some(existing) = index.find_by_hash(&hash) {
-                    if !existing.physical_paths.contains(&path_str) {
+                    if let Some(hash) = DocumentIndex::compute_file_hash(&path) {
+                        let path_str = path.display().to_string();
+                        if let Some(existing) = index.find_by_hash(&hash) {
+                            if !existing.physical_paths.contains(&path_str) {
+                                println!(
+                                    "\n[Watcher] Duplicate download detected: {} -> matches existing canonical: {}",
+                                    file_name.yellow().bold(),
+                                    existing.file.cyan().bold()
+                                );
+                                let mut dup_item = existing.clone();
+                                dup_item.path = path_str;
+                                index.upsert(dup_item);
+                                if let Err(e) = index.save() {
+                                    eprintln!("[Error] Failed to save index: {e}");
+                                }
+                            }
+                            continue;
+                        }
+
                         println!(
-                            "\n[Watcher] Duplicate download detected: {} -> matches existing canonical: {}",
-                            file_name.yellow().bold(),
-                            existing.file.cyan().bold()
+                            "\n[Watcher] Detected new document: {}",
+                            file_name.cyan().bold()
                         );
-                        let mut dup_item = existing.clone();
-                        dup_item.path = path_str;
-                        index.upsert(dup_item);
+
+                        if let Some(item) = axel::engine::analyze_and_build_item(&path, &ai).await {
+                            println!("  Category: {}", item.category.green().bold());
+                            println!("  Keywords: {}", item.keywords.join(", ").dimmed());
+                            if !item.symbols.is_empty() {
+                                println!("  Symbols:  {}", item.symbols.join(", ").magenta());
+                            }
+
+                            index.upsert(item);
+                            if let Err(e) = index.save() {
+                                eprintln!("[Error] Failed to save index: {e}");
+                            }
+                        }
+                    }
+                }
+                axel::watcher::WatchEvent::Removed(path) => {
+                    if index.remove_path(&path) {
+                        println!(
+                            "\n[Watcher] Reconciled deletion from index: {}",
+                            path.display().to_string().red()
+                        );
                         if let Err(e) = index.save() {
                             eprintln!("[Error] Failed to save index: {e}");
                         }
-                    }
-                    continue;
-                }
-
-                println!(
-                    "\n[Watcher] Detected new document: {}",
-                    file_name.cyan().bold()
-                );
-
-                if let Some(item) = axel::engine::analyze_and_build_item(&path, &ai).await {
-                    println!("  Category: {}", item.category.green().bold());
-                    println!("  Keywords: {}", item.keywords.join(", ").dimmed());
-                    if !item.symbols.is_empty() {
-                        println!("  Symbols:  {}", item.symbols.join(", ").magenta());
-                    }
-
-                    index.upsert(item);
-                    if let Err(e) = index.save() {
-                        eprintln!("[Error] Failed to save index: {e}");
                     }
                 }
             }
@@ -311,7 +329,7 @@ async fn run_process(file: &Path, config: &Config) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-async fn run_check(config: &Config) {
+async fn run_check(config: &Config) -> bool {
     println!("\n╔══════════════════════════════════════════════════════╗");
     println!("║             AXEL System Health Check                 ║");
     println!("╚══════════════════════════════════════════════════════╝\n");
@@ -333,13 +351,63 @@ async fn run_check(config: &Config) {
         ));
     }
 
-    if let Some(parent) = config.index_file.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
+    if config.index_file.is_dir() {
+        errors.push(format!(
+            "Index target {} is a directory, expected file path",
+            config.index_file.display()
+        ));
+    } else {
+        let parent_dir = config.index_file.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let parent_to_check = if parent_dir.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            parent_dir
+        };
+
+        if !parent_to_check.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent_to_check) {
                 errors.push(format!(
-                    "Cannot write index to parent directory {}: {e}",
-                    parent.display()
+                    "Cannot create index parent directory {}: {e}",
+                    parent_to_check.display()
                 ));
+            }
+        }
+
+        if parent_to_check.exists() {
+            let test_probe = parent_to_check.join(format!(".axel_probe_{}.tmp", std::process::id()));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&test_probe)
+            {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(test_probe);
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "Index target directory {} is not writable: {e}",
+                        parent_to_check.display()
+                    ));
+                }
+            }
+        }
+
+        if config.index_file.is_file() {
+            match std::fs::read_to_string(&config.index_file) {
+                Ok(content) => {
+                    if let Err(e) = serde_json::from_str::<serde_json::Value>(&content) {
+                        errors.push(format!(
+                            "Existing index file {} is corrupted (invalid JSON: {e})",
+                            config.index_file.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "Cannot read existing index file {}: {e}",
+                        config.index_file.display()
+                    ));
+                }
             }
         }
     }
@@ -432,4 +500,6 @@ async fn run_check(config: &Config) {
     println!("To launch Desktop App: cargo run");
     println!("To launch Web API:     cargo run -- serve");
     println!("To scan folder:        cargo run -- scan\n");
+
+    errors.is_empty()
 }

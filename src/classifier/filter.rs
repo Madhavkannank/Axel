@@ -147,14 +147,9 @@ fn extract_dir_tokens(name: &str) -> Vec<String> {
 
 /// Determine if a directory should be skipped completely during traversal.
 pub fn should_skip_directory(name: &str) -> bool {
-    // Hidden directories (starts with '.')
-    if name.starts_with('.') && name != "." && name != ".." {
-        return true;
-    }
-
     let lower = name.to_lowercase();
 
-    // Check user-configured explicit includes (AXEL_INCLUDE_DIRS overrides default exclusions)
+    // Check user-configured explicit includes first (AXEL_INCLUDE_DIRS overrides hidden and default exclusions - M07)
     if let Ok(includes) = std::env::var("AXEL_INCLUDE_DIRS") {
         for incl in includes.split(',') {
             let clean = incl.trim().to_lowercase();
@@ -162,6 +157,11 @@ pub fn should_skip_directory(name: &str) -> bool {
                 return false;
             }
         }
+    }
+
+    // Hidden directories (starts with '.')
+    if name.starts_with('.') && name != "." && name != ".." {
+        return true;
     }
 
     // Check user-configured custom excludes (AXEL_EXCLUDE_DIRS)

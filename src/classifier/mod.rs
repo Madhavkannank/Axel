@@ -17,6 +17,6 @@ pub use nlp::{
     stem, tokenize,
 };
 pub use privacy::{is_high_risk_identity_document, redact_sensitive_pii, RedactionSummary};
-pub use semantic::{DynamicSemanticClassifier, DOC_DESCRIPTOR_WORDS};
+pub use semantic::{is_ordinal_or_numeric, DynamicSemanticClassifier, DOC_DESCRIPTOR_WORDS};
 pub use tfidf::TfidfEngine;
 

@@ -69,22 +69,24 @@ def process_single_file(file_path):
             print("[ERROR] Extracted text is empty or extraction failed.")
             return False
     else:
-        text = preprocess_text(text)
-        print(f"[INFO] Extracted text length: {len(text)}")
+        full_text = text
+        print(f"[INFO] Extracted text length: {len(full_text)}")
 
-        # HYBRID PIPELINE
-        ml_category, confidence = predict_category(text)
-        ml_keywords = extract_keywords(text, top_n=5)
+        # HYBRID PIPELINE - privacy and ML run on complete untruncated text
+        ml_category, confidence = predict_category(full_text)
+        ml_keywords = extract_keywords(full_text, top_n=5)
 
         print(f"[INFO] ML Category: {ml_category}")
         print(f"[INFO] Confidence: {confidence:.2f}")
         print(f"[INFO] Keywords (TF-IDF): {', '.join(ml_keywords)}")
 
+        prompt_text = preprocess_text(full_text)
+
         print("[INFO] Routing to LLM with ML hints...")
-        result = generate_keywords(text, ml_category=ml_category, ml_keywords=ml_keywords)
+        result = generate_keywords(prompt_text, ml_category=ml_category, ml_keywords=ml_keywords, file_name=os.path.basename(file_path))
         category = result.get("category", "Unknown")
         raw_keywords = result.get("keywords", [])
-        target_kws = clean_keywords(raw_keywords, text=text)[:5]
+        target_kws = clean_keywords(raw_keywords, text=full_text)[:5]
         print("[INFO] Groq response parsed successfully.")
 
     keywords = target_kws
