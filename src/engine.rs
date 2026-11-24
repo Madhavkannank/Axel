@@ -972,6 +972,163 @@ pub struct SafeExclusiveFile {
     pub reused_existing: bool,
 }
 
+pub struct PublishedWorkspaceFile {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub reused_existing: bool,
+}
+
+/// Creates a hidden staging file in `target_dir` (e.g. `.axel_stage_<pid>_<nanos>.tmp`).
+/// Axel's filter specifically skips files starting with `.` or ending in `.tmp`,
+/// ensuring watchers and scans never index an incomplete partial file (A08).
+pub fn create_workspace_staging_file(target_dir: &Path) -> Result<(std::fs::File, PathBuf), std::io::Error> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+
+    for attempt in 0..1000 {
+        let staging_name = format!(".axel_stage_{pid}_{now}_{attempt}.tmp");
+        let staging_path = target_dir.join(&staging_name);
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&staging_path)
+        {
+            Ok(file) => return Ok((file, staging_path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "Failed to allocate temporary staging file in workspace",
+    ))
+}
+
+/// Publishes a fully-written staged file into `target_dir` atomically without replacement (A08).
+/// If `expected_hash` is provided and an existing candidate matches through its single open handle
+/// inside the workspace boundary, that candidate is reused and the staging file is discarded.
+pub fn publish_staged_workspace_file(
+    staging_path: &Path,
+    target_dir: &Path,
+    original_name: &str,
+    expected_hash: Option<&str>,
+    workspace: &Path,
+) -> Result<PublishedWorkspaceFile, std::io::Error> {
+    let p = Path::new(original_name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+
+    for counter in 0..=10000 {
+        let candidate_name = if counter == 0 {
+            original_name.to_string()
+        } else if ext.is_empty() {
+            format!("{stem}_{counter}")
+        } else {
+            format!("{stem}_{counter}.{ext}")
+        };
+
+        let candidate_path = target_dir.join(&candidate_name);
+
+        // Check if candidate exists (or symlink)
+        if let Ok(_sym_meta) = std::fs::symlink_metadata(&candidate_path) {
+            // Candidate already exists. If expected_hash is provided, verify candidate
+            // through a single open file handle and boundary check (A08).
+            if let Some(expected) = expected_hash {
+                // Ensure candidate does not escape workspace via symlink
+                let resolved = crate::config::resolve_workspace_path(&candidate_path);
+                if is_path_inside_workspace(&resolved, workspace) {
+                    if let Ok(mut cand_file) = std::fs::File::open(&resolved) {
+                        if let Ok(meta) = cand_file.metadata() {
+                            if meta.is_file() {
+                                use sha2::{Digest, Sha256};
+                                use std::io::Read;
+                                let mut hasher = Sha256::new();
+                                let mut buf = [0u8; 65536];
+                                let mut ok = true;
+                                loop {
+                                    match cand_file.read(&mut buf) {
+                                        Ok(0) => break,
+                                        Ok(n) => hasher.update(&buf[..n]),
+                                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                                        Err(_) => {
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if ok {
+                                    let cand_hash = format!("{:x}", hasher.finalize());
+                                    if cand_hash == expected {
+                                        // Candidate matches exactly! Discard staging file and reuse candidate.
+                                        let _ = std::fs::remove_file(staging_path);
+                                        return Ok(PublishedWorkspaceFile {
+                                            path: candidate_path,
+                                            file_name: candidate_name,
+                                            reused_existing: true,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Collision or hash mismatch: try next candidate
+            continue;
+        }
+
+        // Candidate does not exist. Atomically publish without replacement.
+        // On Unix, hard_link fails with AlreadyExists if candidate_path appeared concurrently.
+        #[cfg(unix)]
+        {
+            match std::fs::hard_link(staging_path, &candidate_path) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(staging_path);
+                    return Ok(PublishedWorkspaceFile {
+                        path: candidate_path,
+                        file_name: candidate_name,
+                        reused_existing: false,
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    continue;
+                }
+                Err(_) => {
+                    // Fall back to rename if hard link is unsupported (e.g. cross-filesystem)
+                    if std::fs::rename(staging_path, &candidate_path).is_ok() {
+                        return Ok(PublishedWorkspaceFile {
+                            path: candidate_path,
+                            file_name: candidate_name,
+                            reused_existing: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            if std::fs::rename(staging_path, &candidate_path).is_ok() {
+                return Ok(PublishedWorkspaceFile {
+                    path: candidate_path,
+                    file_name: candidate_name,
+                    reused_existing: false,
+                });
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(staging_path);
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("Exhausted candidate filenames for {original_name} in {}", target_dir.display()),
+    ))
+}
+
 /// Publishes a file into `target_dir` atomically without replacement by opening the handle
 /// with exclusive creation (`create_new(true)`) and retrying collisions (H04).
 /// If `expected_hash` is provided and a candidate already exists with exact identical content,
@@ -1107,24 +1264,32 @@ pub async fn ingest_local_files(
                 default_dest
             } else {
                 let src_hash = DocumentIndex::compute_file_hash(src_path);
-                // H04: Write through handle opened with exclusive creation and retry collisions
-                let exclusive = create_exclusive_workspace_file(
+                // A08: Stage in hidden file first, sync completely, then publish atomically without replacement
+                let (mut staging_file, staging_path) = create_workspace_staging_file(&workspace_resolved)
+                    .map_err(|e| format!("Failed to create staging file: {e}"))?;
+                let mut src_file = std::fs::File::open(src_path)
+                    .map_err(|e| format!("Failed to open source file {}: {e}", src_path.display()))?;
+                std::io::copy(&mut src_file, &mut staging_file)
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&staging_path);
+                        format!("Failed to copy file to staging {}: {e}", staging_path.display())
+                    })?;
+                staging_file.sync_all()
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&staging_path);
+                        format!("Failed to sync staging file: {e}")
+                    })?;
+                drop(staging_file);
+
+                let published = publish_staged_workspace_file(
+                    &staging_path,
                     &workspace_resolved,
                     file_name,
                     src_hash.as_deref(),
-                ).map_err(|e| format!("Failed to reserve destination file: {e}"))?;
+                    &workspace_resolved,
+                ).map_err(|e| format!("Failed to publish file: {e}"))?;
 
-                if !exclusive.reused_existing {
-                    let mut src_file = std::fs::File::open(src_path)
-                        .map_err(|e| format!("Failed to open source file {}: {e}", src_path.display()))?;
-                    let mut dest_file = exclusive.file;
-                    std::io::copy(&mut src_file, &mut dest_file)
-                        .map_err(|e| format!("Failed to copy file to {}: {e}", exclusive.path.display()))?;
-                    dest_file.sync_all()
-                        .map_err(|e| format!("Failed to sync file: {e}"))?;
-                }
-
-                exclusive.path
+                published.path
             }
         } else {
             src_path.clone()
@@ -1139,13 +1304,33 @@ pub async fn ingest_local_files(
 }
 
 pub fn is_path_inside_workspace(path: &Path, workspace_folder: &Path) -> bool {
-    match (
-        std::fs::canonicalize(workspace_folder),
-        std::fs::canonicalize(path),
-    ) {
-        (Ok(base), Ok(target)) => target.starts_with(&base),
-        _ => false,
-    }
+    let resolved_workspace = crate::config::resolve_workspace_path(workspace_folder);
+    let resolved_path = if let Ok(c) = std::fs::canonicalize(path) {
+        c
+    } else {
+        // If the path does not exist on disk (e.g. vanished/removed file or rename source),
+        // try canonicalizing its deepest existing parent to resolve symlinks in the path prefix.
+        let mut ancestors_stack = Vec::new();
+        let mut curr = path;
+        let mut found_parent = None;
+        while let Some(parent) = curr.parent() {
+            if let Some(file_name) = curr.file_name() {
+                ancestors_stack.push(file_name);
+            }
+            if let Ok(canon_parent) = std::fs::canonicalize(parent) {
+                let mut resolved = canon_parent;
+                for comp in ancestors_stack.into_iter().rev() {
+                    resolved.push(comp);
+                }
+                found_parent = Some(resolved);
+                break;
+            }
+            curr = parent;
+        }
+        found_parent.unwrap_or_else(|| crate::config::resolve_workspace_path(path))
+    };
+
+    resolved_path.starts_with(&resolved_workspace)
 }
 
 pub fn trash_file_safely(path: &Path) -> Result<(), String> {
@@ -1169,125 +1354,143 @@ pub fn delete_document_from_index(
 
     let mut file_removed_from_disk = false;
     let mut disk_removal_method = None;
-    let mut disk_error = None;
 
     let target_path_buf = PathBuf::from(&item.path);
     let target_path = target_path_buf.as_path();
 
     if delete_file {
         if !is_path_inside_workspace(target_path, &config.input_folder) {
-            disk_error = Some("Target file is outside workspace boundaries; disk deletion aborted.".to_string());
-        } else if !target_path.exists() {
-            disk_error = Some("Target file does not exist on disk.".to_string());
-        } else {
-            // Verify current disk contents still match indexed hash before deletion
-            match DocumentIndex::compute_file_hash(target_path) {
-                Some(ref current_hash) if current_hash == hash => {
-                    // Pre-check verified live aliases remaining in physical_paths
-                    let mut remaining_live_copies = Vec::new();
-                    let target_resolved = resolve_workspace_path(target_path);
-                    for alias in &item.physical_paths {
-                        let apath = resolve_workspace_path(Path::new(alias));
-                        if apath != target_resolved
-                            && is_path_inside_workspace(&apath, &config.input_folder)
-                            && apath.exists()
-                        {
-                            if let Some(chash) = DocumentIndex::compute_file_hash(&apath) {
-                                if chash == hash {
-                                    remaining_live_copies.push(alias.clone());
-                                }
-                            }
-                        }
+            return Err("Target file is outside workspace boundaries; disk deletion aborted.".to_string());
+        }
+        if !target_path.exists() {
+            return Err("Target file does not exist on disk.".to_string());
+        }
+
+        // Verify current disk contents still match indexed hash before deletion
+        match DocumentIndex::compute_file_hash(target_path) {
+            Some(ref current_hash) if current_hash == hash => {}
+            Some(_) => {
+                return Err("Security abort: File contents on disk have been modified since indexing. Refusing to delete to prevent data loss.".to_string());
+            }
+            None => {
+                return Err("Security abort: Could not read target file to verify hash.".to_string());
+            }
+        }
+
+        // Pre-check verified live aliases remaining in physical_paths
+        let mut remaining_live_copies = Vec::new();
+        let target_resolved = resolve_workspace_path(target_path);
+        for alias in &item.physical_paths {
+            let apath = resolve_workspace_path(Path::new(alias));
+            if apath != target_resolved
+                && is_path_inside_workspace(&apath, &config.input_folder)
+                && apath.exists()
+            {
+                if let Some(chash) = DocumentIndex::compute_file_hash(&apath) {
+                    if chash == *hash {
+                        remaining_live_copies.push(alias.clone());
                     }
-
-                    // H09: Recoverable deletion workflow:
-                    // Stage removal by moving target file to a temporary staging name in the same parent directory
-                    static DEL_STAGE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-                    let count = DEL_STAGE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0);
-                    let parent = target_path.parent().unwrap_or_else(|| Path::new("."));
-                    let stage_del_name = format!(".tmp_del_{}_{}_{}.tmp", std::process::id(), now, count);
-                    let stage_del_path = parent.join(stage_del_name);
-
-                    if let Err(e) = std::fs::rename(target_path, &stage_del_path) {
-                        disk_error = Some(format!("Failed to stage file for deletion: {e}"));
-                    } else {
-                        // File staged. Now perform index update
-                        let index_updated = if !remaining_live_copies.is_empty() {
-                            // H09: Live aliases remain! Promote verified remaining copy instead of dropping whole record
-                            index.remove_physical_copy(hash, &item.path)
-                        } else {
-                            index.remove_by_hash(hash).is_some()
-                        };
-
-                        if !index_updated {
-                            // Index update failed, rollback disk rename
-                            let _ = std::fs::rename(&stage_del_path, target_path);
-                            return Err("Document not found in index".to_string());
-                        }
-
-                        // Save index to disk
-                        match index.save() {
-                            Ok(_) => {
-                                // Index saved successfully! Commit disk deletion from staging
-                                if permanent {
-                                    match std::fs::remove_file(&stage_del_path) {
-                                        Ok(_) => {
-                                            file_removed_from_disk = true;
-                                            disk_removal_method = Some("permanent".to_string());
-                                        }
-                                        Err(e) => {
-                                            disk_error = Some(format!("Failed to remove staged file permanently: {e}"));
-                                        }
-                                    }
-                                } else {
-                                    match trash::delete(&stage_del_path) {
-                                        Ok(_) => {
-                                            file_removed_from_disk = true;
-                                            disk_removal_method = Some("trash".to_string());
-                                        }
-                                        Err(_) => {
-                                            // Fallback to permanent remove of staging file
-                                            let _ = std::fs::remove_file(&stage_del_path);
-                                            file_removed_from_disk = true;
-                                            disk_removal_method = Some("permanent".to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            Err(save_err) => {
-                                // Index save failed! ROLL BACK file deletion by renaming staging file back to original!
-                                let _ = std::fs::rename(&stage_del_path, target_path);
-                                return Err(format!("Failed to save index (disk deletion rolled back): {save_err}"));
-                            }
-                        }
-                    }
-                }
-                Some(_) => {
-                    disk_error = Some("Security abort: File contents on disk have been modified since indexing. Refusing to delete to prevent data loss.".to_string());
-                }
-                None => {
-                    disk_error = Some("Security abort: Could not read target file to verify hash.".to_string());
                 }
             }
         }
+
+        // H09: Recoverable deletion workflow:
+        // Stage removal by moving target file to a temporary staging name in the same parent directory
+        static DEL_STAGE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let count = DEL_STAGE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let parent = target_path.parent().unwrap_or_else(|| Path::new("."));
+        let stage_del_name = format!(".tmp_del_{}_{}_{}.tmp", std::process::id(), now, count);
+        let stage_del_path = parent.join(stage_del_name);
+
+        std::fs::rename(target_path, &stage_del_path)
+            .map_err(|e| format!("Failed to stage file for deletion: {e}"))?;
+
+        // Attempt deletion from staging
+        if permanent {
+            if let Err(e) = std::fs::remove_file(&stage_del_path) {
+                let rollback_res = std::fs::rename(&stage_del_path, target_path);
+                let rollback_msg = match rollback_res {
+                    Ok(_) => "Staged file successfully restored to original path.".to_string(),
+                    Err(re) => format!(
+                        "CRITICAL: Failed to restore staged file to original path: {re}. File remains at {}",
+                        stage_del_path.display()
+                    ),
+                };
+                return Err(format!("Failed to permanently remove staged file: {e}. {rollback_msg}"));
+            }
+            file_removed_from_disk = true;
+            disk_removal_method = Some("permanent".to_string());
+        } else {
+            match trash::delete(&stage_del_path) {
+                Ok(_) => {
+                    file_removed_from_disk = true;
+                    disk_removal_method = Some("trash".to_string());
+                }
+                Err(trash_err) => {
+                    // A01: NEVER permanently remove on trash failure without explicit consent!
+                    // Restore original file and surface any rollback failure.
+                    let rollback_res = std::fs::rename(&stage_del_path, target_path);
+                    let rollback_msg = match rollback_res {
+                        Ok(_) => "File successfully restored to original path.".to_string(),
+                        Err(re) => format!(
+                            "CRITICAL: Failed to restore file from staging: {re}. File remains at {}",
+                            stage_del_path.display()
+                        ),
+                    };
+                    return Err(format!(
+                        "Failed to move file to OS trash: {trash_err}. Refusing permanent deletion without explicit consent. {rollback_msg}"
+                    ));
+                }
+            }
+        }
+
+        // File removed from disk. Now perform index update with verified alias promotion (A05)
+        let verified_promoted = remaining_live_copies.first().map(|s| s.as_str());
+        let index_updated = if !remaining_live_copies.is_empty() {
+            index.remove_physical_copy_with_promotion(hash, &item.path, verified_promoted)
+        } else {
+            index.remove_by_hash(hash).is_some()
+        };
+
+        if !index_updated {
+            return Err("Document not found in index".to_string());
+        }
+
+        // Save index to disk
+        if let Err(save_err) = index.save() {
+            // A05: Roll back live in-memory index on save failure!
+            index.restore_item(item.clone());
+            return Err(format!("Failed to save index after file deletion: {save_err}"));
+        }
     } else {
         // Only removing from index without deleting file on disk
-        index.remove_by_hash(hash).ok_or_else(|| "Document not found".to_string())?;
-        index.save().map_err(|e| format!("Failed to save index: {e}"))?;
+        let removed = index
+            .remove_by_hash(hash)
+            .ok_or_else(|| "Document not found".to_string())?;
+        if let Err(save_err) = index.save() {
+            index.restore_item(removed);
+            return Err(format!("Failed to save index: {save_err}"));
+        }
     }
+
+    let final_item = index.find_by_hash(hash);
+    let (final_file, index_deleted) = match final_item {
+        Some(fi) => (fi.file.clone(), false),
+        None => (item.file.clone(), true),
+    };
 
     Ok(DeleteOutcome {
         deleted: true,
-        index_deleted: true,
+        index_deleted,
         file_removed_from_disk,
         disk_removal_method,
         hash: item.hash,
-        file: item.file,
-        error: disk_error,
+        file: final_file,
+        error: None,
     })
 }
 

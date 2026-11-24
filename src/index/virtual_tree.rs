@@ -73,17 +73,60 @@ pub struct DuplicateCluster {
     pub copy_count: usize,
 }
 
-fn is_file_like_segment(seg: &str) -> bool {
-    if let Some(pos) = seg.rfind('.') {
-        if pos > 0 && pos < seg.len() - 1 {
-            let ext = &seg[pos + 1..];
-            return ext.len() >= 1
-                && ext.len() <= 5
-                && ext.chars().all(|c| c.is_ascii_alphanumeric())
-                && ext.chars().any(|c| c.is_ascii_alphabetic());
+fn is_recognized_file_segment(seg: &str) -> bool {
+    let p = Path::new(seg);
+    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+        let ext_lower = ext.to_lowercase();
+        // A15: Check if detect_file_type recognizes it as a document/code/media/archive leaf file.
+        // Dotted folder names like "Research.v2" or "Project.2026" evaluate to Binary and are preserved.
+        let ft = crate::extractor::detect_file_type(seg);
+        if ft != crate::extractor::FileType::Binary {
+            return true;
         }
+        matches!(
+            ext_lower.as_str(),
+            "doc" | "docx" | "pdf" | "odt" | "rtf" | "tex" | "epub" | "ppt" | "pptx" | "xls" | "xlsx" | "csv" | "tsv" | "json" | "xml" | "txt" | "md"
+        )
+    } else {
+        false
     }
-    false
+}
+
+pub fn normalize_folder_segments(path_str: &str, file_name: &str) -> Option<String> {
+    let clean = path_str.trim().trim_matches('/');
+    if clean.is_empty() {
+        return None;
+    }
+
+    let raw_segments: Vec<&str> = clean
+        .split('/')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if raw_segments.is_empty() {
+        return None;
+    }
+
+    // Filter directory segments:
+    // - Segments matching `file_name` are the leaf item itself, not a directory.
+    // - Spurious suggested filenames with recognized leaf extensions (e.g. "Syllabus.pdf") must not be treated as folders.
+    // - Dotted versioned directories (e.g. "Research.v2") are preserved.
+    let mut dir_segments: Vec<&str> = Vec::new();
+    for &seg in &raw_segments {
+        if seg.eq_ignore_ascii_case(file_name) {
+            continue;
+        }
+        if is_recognized_file_segment(seg) {
+            continue;
+        }
+        dir_segments.push(seg);
+    }
+
+    if !dir_segments.is_empty() {
+        Some(dir_segments.join("/"))
+    } else {
+        None
+    }
 }
 
 /// Compute dynamic virtual paths (multiple virtual pointers) for a document.
@@ -98,45 +141,19 @@ pub fn compute_virtual_paths(
     let mut virtual_paths = Vec::new();
 
     // 1. Ingest dynamic LLM-discovered semantic paths, sanitizing spurious file extensions
+    // while preserving real versioned folder names (e.g. "Research.v2")
     for p in suggested_paths {
-        let clean = p.trim().trim_matches('/');
-        if clean.is_empty() {
-            continue;
-        }
-
-        let raw_segments: Vec<&str> = clean
-            .split('/')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if raw_segments.is_empty() {
-            continue;
-        }
-
-        // Filter directory segments:
-        // - Segments matching `file_name` are the leaf item itself, not a directory.
-        // - Spurious suggested filenames with extensions (e.g. "Syllabus.pdf") must not be treated as folders.
-        let mut dir_segments: Vec<&str> = Vec::new();
-        for &seg in &raw_segments {
-            if seg == file_name {
-                continue;
-            }
-            if is_file_like_segment(seg) {
-                continue;
-            }
-            dir_segments.push(seg);
-        }
-
-        if !dir_segments.is_empty() {
-            let folder_path = dir_segments.join("/");
+        if let Some(folder_path) = normalize_folder_segments(p, file_name) {
             virtual_paths.push(format!("{folder_path}/{file_name}"));
         }
     }
 
-    // 2. Dynamic Fallback: If no paths were provided by LLM/taxonomy, map directly to Category / File
+    // 2. Dynamic Fallback: If no paths were provided by LLM/taxonomy, normalize Category
+    // through the identical normalization pipeline (A15).
     if virtual_paths.is_empty() {
-        let cat_clean = if category.trim().is_empty() { "General" } else { category.trim() };
-        virtual_paths.push(format!("{cat_clean}/{file_name}"));
+        let folder_path = normalize_folder_segments(category, file_name)
+            .unwrap_or_else(|| "General".to_string());
+        virtual_paths.push(format!("{folder_path}/{file_name}"));
     }
 
     virtual_paths.sort();
@@ -265,5 +282,21 @@ mod tests {
 
         assert!(result.contains(&format!("Academics/Data Science/{file_name}")));
         assert!(result.contains(&format!("Data Science/{file_name}")));
+    }
+
+    #[test]
+    fn test_compute_virtual_paths_preserves_versioned_folder_names() {
+        let file_name = "report.docx";
+        let suggested = vec![
+            "Research.v2/Papers".to_string(),
+            "Project.2026/Drafts".to_string(),
+        ];
+        let result = compute_virtual_paths(file_name, "Research.v2", &suggested, "docx");
+        assert!(result.contains(&"Research.v2/Papers/report.docx".to_string()));
+        assert!(result.contains(&"Project.2026/Drafts/report.docx".to_string()));
+
+        // Also test fallback normalization
+        let fallback_result = compute_virtual_paths(file_name, "Research.v2/Summary.docx", &[], "docx");
+        assert_eq!(fallback_result, vec!["Research.v2/report.docx".to_string()]);
     }
 }

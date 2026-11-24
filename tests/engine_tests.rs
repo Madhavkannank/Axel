@@ -539,12 +539,12 @@ fn test_http_delete_document_target_verification_and_explicit_permanent() {
     // 1. Modify the file on disk so its hash no longer matches indexed hash
     std::fs::write(&test_file, b"Modified document content after indexing").unwrap();
 
-    // 2. Attempt deletion with delete_file: true. It MUST refuse to delete the changed file on disk!
-    let outcome = axel::engine::delete_document_from_index(&file_hash, true, false, &config, &mut index).unwrap();
-    assert!(outcome.index_deleted);
-    assert!(!outcome.file_removed_from_disk, "Modified file on disk must NOT be deleted");
-    assert!(outcome.error.unwrap().contains("modified"));
+    // 2. Attempt deletion with delete_file: true. It MUST refuse to delete the changed file on disk and abort!
+    let res = axel::engine::delete_document_from_index(&file_hash, true, false, &config, &mut index);
+    assert!(res.is_err(), "Must refuse to delete modified file on disk");
+    assert!(res.unwrap_err().contains("modified"));
     assert!(test_file.exists(), "Modified file must be preserved on disk");
+    assert!(index.find_by_hash(&file_hash).is_some(), "Document must still remain in index when deletion was aborted");
 
     // 3. Re-index with current content and delete with explicit permanent: true
     let current_hash = DocumentIndex::compute_file_hash(&test_file).unwrap();
@@ -564,6 +564,56 @@ fn test_http_delete_document_target_verification_and_explicit_permanent() {
     assert!(outcome2.file_removed_from_disk);
     assert_eq!(outcome2.disk_removal_method, Some("permanent".to_string()));
     assert!(!test_file.exists());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_delete_document_verified_alias_promotion() {
+    let temp_dir = std::env::temp_dir().join(format!("axel_alias_promo_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let file_a = temp_dir.join("copy_a.txt");
+    let file_b = temp_dir.join("copy_b.txt");
+    let content = b"Identical content across two aliases for promotion test";
+    std::fs::write(&file_a, content).unwrap();
+    std::fs::write(&file_b, content).unwrap();
+
+    let mut config = Config::default();
+    config.input_folder = temp_dir.clone();
+    config.index_file = temp_dir.join("index.json");
+
+    let mut index = DocumentIndex::load(config.index_file.clone());
+    let hash = DocumentIndex::compute_file_hash(&file_a).unwrap();
+
+    let mut item = IndexItem::new(
+        "copy_a.txt".to_string(),
+        "Document".to_string(),
+        vec!["copy_a.txt".to_string()],
+        Vec::new(),
+        file_a.display().to_string(),
+        hash.clone(),
+        Vec::new(),
+    );
+    item.physical_paths = vec![file_a.display().to_string(), file_b.display().to_string()];
+    item.is_duplicate = true;
+    index.upsert(item);
+    index.save().unwrap();
+
+    // Delete primary file_a permanently
+    let outcome = axel::engine::delete_document_from_index(&hash, true, true, &config, &mut index).unwrap();
+    assert!(outcome.deleted);
+    assert!(!outcome.index_deleted, "Index record should NOT be deleted because copy_b still exists");
+    assert!(!file_a.exists(), "Primary file_a should be deleted from disk");
+    assert!(file_b.exists(), "Alias file_b must still exist on disk");
+
+    // The index item's primary path should now be promoted to file_b!
+    let item_after = index.find_by_hash(&hash).expect("Item must still exist");
+    assert_eq!(item_after.path, file_b.display().to_string(), "Primary path must be promoted to file_b");
+    assert_eq!(item_after.file, "copy_b.txt", "File name must be updated to copy_b.txt");
+    assert_eq!(item_after.physical_paths.len(), 1);
+    assert_eq!(item_after.physical_paths[0], file_b.display().to_string());
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -589,15 +639,15 @@ async fn test_api_security_loopback_and_boundary_enforcement() {
     let ai = std::sync::Arc::new(axel::ai::AiEngine::new(&config));
     let (events_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 
-    let state = axel::server::AppState {
-        config: config.clone(),
-        index: index.clone(),
+    let state = axel::server::AppState::new(
+        config.clone(),
+        index.clone(),
         ai,
         events_tx,
-        session_token: session_token.clone(),
-        api_token: None,
-        is_remote: false,
-    };
+        None,
+        session_token.clone(),
+        false,
+    );
 
     let app = axel::server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -932,15 +982,15 @@ async fn test_search_total_and_limit_reporting() {
     let ai = std::sync::Arc::new(axel::ai::AiEngine::new(&config));
     let (events_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 
-    let state = axel::server::AppState {
-        config: config.clone(),
+    let state = axel::server::AppState::new(
+        config.clone(),
         index,
         ai,
         events_tx,
-        session_token: "test-token".to_string(),
-        api_token: Some("test-token".to_string()),
-        is_remote: false,
-    };
+        Some("test-token".to_string()),
+        "test-token".to_string(),
+        false,
+    );
 
     let app = axel::server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1079,15 +1129,15 @@ async fn test_m03_raw_download_tries_physical_aliases_when_primary_missing() {
     let ai = std::sync::Arc::new(axel::ai::AiEngine::new(&config));
     let (events_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 
-    let state = axel::server::AppState {
-        config: config.clone(),
+    let state = axel::server::AppState::new(
+        config.clone(),
         index,
         ai,
         events_tx,
-        session_token: "test-token".to_string(),
-        api_token: Some("test-token".to_string()),
-        is_remote: false,
-    };
+        Some("test-token".to_string()),
+        "test-token".to_string(),
+        false,
+    );
 
     let app = axel::server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1128,15 +1178,15 @@ async fn test_m02_upload_3_18_mib_file_succeeds() {
     let ai = std::sync::Arc::new(axel::ai::AiEngine::new(&config));
     let (events_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 
-    let state = axel::server::AppState {
-        config: config.clone(),
+    let state = axel::server::AppState::new(
+        config.clone(),
         index,
         ai,
         events_tx,
-        session_token: "test-token".to_string(),
-        api_token: Some("test-token".to_string()),
-        is_remote: false,
-    };
+        Some("test-token".to_string()),
+        "test-token".to_string(),
+        false,
+    );
 
     let app = axel::server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1194,16 +1244,16 @@ fn test_h07_large_file_legacy_hash_migration() {
     file.set_len(size as u64).unwrap();
 
     let full_sha256 = DocumentIndex::compute_file_hash(&file_path).unwrap();
-    let legacy_sparse_hash = "legacy_sparse_hash_v1_dummy".to_string();
+    let legacy_sparse_hash = "legacy_sparse_hash_v2_dummy".to_string();
 
-    // Stamp with legacy version 1 xattrs
+    // Stamp with real legacy version 2 xattrs lacking user.axel.hash_algo (A04)
     let _ = xattr::set(&file_path, axel::index::metadata::XATTR_CATEGORY, b"Documents/Large");
     let _ = xattr::set(&file_path, axel::index::metadata::XATTR_HASH, legacy_sparse_hash.as_bytes());
-    let _ = xattr::set(&file_path, axel::index::metadata::XATTR_VERSION, b"1");
+    let _ = xattr::set(&file_path, axel::index::metadata::XATTR_VERSION, b"2");
 
-    // H07: read_from_file must reject cached xattr for files > 16MB when version != "2"
+    // A04: read_from_file must reject cached xattr for files > 16MB when user.axel.hash_algo != "sha256"
     let read_tagged = axel::index::metadata::FileMetadataTag::read_from_file(&file_path);
-    assert!(read_tagged.is_none(), "H07: Must reject legacy sparse hash on files > 16MB");
+    assert!(read_tagged.is_none(), "A04: Must reject legacy sparse hash on files > 16MB lacking sha256 algo tag");
 
     // Create index JSON referencing legacy hash
     let index_file = temp_dir.join("index.json");
@@ -1218,13 +1268,118 @@ fn test_h07_large_file_legacy_hash_migration() {
     )];
     std::fs::write(&index_file, serde_json::to_string(&initial_items).unwrap()).unwrap();
 
-    // Load index - must auto-migrate legacy large file to full SHA-256 and version 2
-    let loaded_index = DocumentIndex::load(&index_file);
+    // Load index - must auto-migrate legacy large file to full SHA-256
+    let mut loaded_index = DocumentIndex::load(&index_file);
     let migrated_item = loaded_index.find_by_hash(&full_sha256);
-    assert!(migrated_item.is_some(), "H07: DocumentIndex::load must migrate large legacy file to full SHA-256");
+    assert!(migrated_item.is_some(), "A04: DocumentIndex::load must migrate large legacy file to full SHA-256");
+
+    // Save index - durably commits index.json and stamps version 3 and sha256 algo tag (A04)
+    loaded_index.save().unwrap();
 
     let v_tag = xattr::get(&file_path, axel::index::metadata::XATTR_VERSION).ok().flatten();
-    assert_eq!(v_tag.as_deref(), Some(&b"2"[..]), "H07: Migration must stamp user.axel.version = 2");
+    assert_eq!(v_tag.as_deref(), Some(&b"3"[..]), "A04: Migration must stamp user.axel.version = 3");
+    let a_tag = xattr::get(&file_path, axel::index::metadata::XATTR_HASH_ALGO).ok().flatten();
+    assert_eq!(a_tag.as_deref(), Some(&b"sha256"[..]), "A04: Migration must stamp user.axel.hash_algo = sha256");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_a02_a03_a09_index_persistence_locking_and_backup_schema() {
+    let temp_dir = std::env::temp_dir().join(format!("axel_a09_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let index_file = temp_dir.join("index.json");
+    let bak_file = temp_dir.join("index.json.bak");
+
+    // 1. Create a valid index with 1 item and save it
+    let mut index = DocumentIndex::load(&index_file);
+    let item1 = IndexItem::new(
+        "doc1.txt".to_string(),
+        "Engineering".to_string(),
+        vec!["rust".to_string()],
+        Vec::new(),
+        "documents/doc1.txt".to_string(),
+        "hash_doc_1".to_string(),
+        Vec::new(),
+    );
+    index.upsert(item1);
+    index.save().unwrap();
+
+    // 2. Perform a second save: backup rotation should copy the valid primary index to index.json.bak
+    let item2 = IndexItem::new(
+        "doc2.txt".to_string(),
+        "Finance".to_string(),
+        vec!["invoice".to_string()],
+        Vec::new(),
+        "documents/doc2.txt".to_string(),
+        "hash_doc_2".to_string(),
+        Vec::new(),
+    );
+    index.upsert(item2);
+    index.save().unwrap();
+    assert!(bak_file.exists(), "A valid primary index must be rotated to index.json.bak");
+
+    // Verify .bak has valid Vec<IndexItem> schema
+    let bak_content = std::fs::read_to_string(&bak_file).unwrap();
+    let bak_items: Vec<IndexItem> = serde_json::from_str(&bak_content).unwrap();
+    assert_eq!(bak_items.len(), 1, "Backup must contain valid 1-item generation");
+
+    // 3. A09: Now corrupt primary with an arbitrary JSON value that is NOT a Vec<IndexItem> (e.g. `{ "invalid": true }`)
+    std::fs::write(&index_file, b"{\"invalid\": \"not an array of items\"}").unwrap();
+
+    // Create a new handle attempting to save. The primary validation must REJECT the object JSON
+    // and NOT overwrite index.json.bak!
+    let mut index_handle = DocumentIndex::load(&index_file);
+    // Loading from corrupt primary should recover from valid index.json.bak!
+    assert_eq!(index_handle.items().len(), 1, "Must recover valid items from backup");
+    assert_eq!(index_handle.items()[0].hash, "hash_doc_1");
+
+    // Verify corrupt primary was preserved to .corrupt.<timestamp>
+    let mut found_corrupt_file = false;
+    for entry in std::fs::read_dir(&temp_dir).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_string_lossy().contains("index.json.corrupt") {
+            found_corrupt_file = true;
+            break;
+        }
+    }
+    assert!(found_corrupt_file, "A09: Corrupt primary index must be preserved to .corrupt.<timestamp>");
+
+    // 4. A02: Verify removed physical alias does not reappear on concurrent merge
+    let mut item_with_alias = IndexItem::new(
+        "primary.txt".to_string(),
+        "Legal".to_string(),
+        vec!["contract".to_string()],
+        Vec::new(),
+        "documents/primary.txt".to_string(),
+        "hash_contract".to_string(),
+        Vec::new(),
+    );
+    item_with_alias.physical_paths = vec![
+        "documents/primary.txt".to_string(),
+        "documents/alias.txt".to_string(),
+    ];
+    item_with_alias.is_duplicate = true;
+    index_handle.upsert(item_with_alias);
+    index_handle.save().unwrap();
+
+    // Now remove alias.txt
+    index_handle.remove_physical_copy("hash_contract", "documents/alias.txt");
+    assert_eq!(index_handle.find_by_hash("hash_contract").unwrap().physical_paths.len(), 1);
+
+    // Save: on-disk index.json currently has both primary.txt and alias.txt
+    // With explicit mutation deltas (A02), alias.txt must NOT be revived!
+    index_handle.save().unwrap();
+
+    let reloaded = DocumentIndex::load(&index_file);
+    let contract_item = reloaded.find_by_hash("hash_contract").unwrap();
+    assert_eq!(
+        contract_item.physical_paths.len(),
+        1,
+        "A02: Explicitly removed physical alias must not reappear after save"
+    );
+    assert_eq!(contract_item.physical_paths[0], "documents/primary.txt");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -1295,15 +1450,15 @@ async fn test_m06_search_limit_honors_down_to_one() {
     let ai = std::sync::Arc::new(axel::ai::AiEngine::new(&config));
     let (events_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 
-    let state = axel::server::AppState {
-        config: config.clone(),
+    let state = axel::server::AppState::new(
+        config.clone(),
         index,
         ai,
         events_tx,
-        session_token: "test-token".to_string(),
-        api_token: Some("test-token".to_string()),
-        is_remote: false,
-    };
+        Some("test-token".to_string()),
+        "test-token".to_string(),
+        false,
+    );
 
     let app = axel::server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1495,6 +1650,140 @@ async fn test_ai_categorization_guardrails_media_and_ordinals() {
         assert!(!vp.contains(".pdf/"), "Virtual path must not treat .pdf as folder: {vp}");
         assert!(vp.ends_with("5thSemQPs.pdf"));
     }
+}
+
+#[test]
+fn test_a06_vanished_path_containment_and_matching() {
+    let temp_dir = std::env::temp_dir().join(format!("axel_a06_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let workspace = &temp_dir;
+
+    let sub_folder = workspace.join("sub_folder");
+    std::fs::create_dir_all(&sub_folder).unwrap();
+
+    let non_existent_file = sub_folder.join("deleted_doc.txt");
+    assert!(!non_existent_file.exists());
+
+    // A06: is_path_inside_workspace must return true for vanished paths whose existing ancestors are inside workspace
+    assert!(
+        axel::engine::is_path_inside_workspace(&non_existent_file, workspace),
+        "A06: Vanished path inside workspace ancestor must evaluate to true"
+    );
+
+    // Outside path that doesn't exist
+    let outside_non_existent = std::env::temp_dir().join(format!("outside_{}", std::process::id())).join("vanished.txt");
+    assert!(
+        !axel::engine::is_path_inside_workspace(&outside_non_existent, workspace),
+        "A06: Vanished path outside workspace must evaluate to false"
+    );
+
+    // Test DocumentIndex::remove_path for vanished paths using both relative and absolute representations
+    let mut index = DocumentIndex::new();
+    let item = IndexItem::new(
+        "deleted_doc.txt".to_string(),
+        "Docs".to_string(),
+        vec!["test".to_string()],
+        Vec::new(),
+        non_existent_file.display().to_string(),
+        "hash_vanished_123".to_string(),
+        Vec::new(),
+    );
+    index.upsert(item);
+    assert_eq!(index.count(), 1);
+
+    // Remove using path - must match vanished path accurately
+    let removed = index.remove_path(&non_existent_file);
+    assert!(removed, "A06: remove_path must match and remove vanished path");
+    assert_eq!(index.count(), 0);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_a11_a17_docx_namespace_decoupling() {
+    use axel::extractor::docx::strip_docx_xml;
+
+    // Test default or non-standard namespace prefix like 'w14:', 'ns2:', or no prefix
+    let xml_nonstandard = r#"
+        <ns2:p>
+            <ns2:t>Custom prefix text</ns2:t>
+        </ns2:p>
+        <p>
+            <t>No prefix text</t>
+            <br/>
+            <t>After break</t>
+        </p>
+    "#;
+
+    let stripped = strip_docx_xml(xml_nonstandard);
+    assert!(stripped.contains("Custom prefix text"), "Must extract text from non-w: namespaced tags");
+    assert!(stripped.contains("No prefix text"), "Must extract text from unprefixed tags");
+    assert!(stripped.contains("After break"), "Must extract text after line breaks");
+}
+
+#[test]
+fn test_a08_staging_file_creation_and_atomic_publish() {
+    use std::io::Write;
+    let temp_dir = std::env::temp_dir().join(format!("axel_a08_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let (mut staging_file, staging_path) =
+        axel::engine::create_workspace_staging_file(&temp_dir).expect("Failed to create staging file");
+    assert!(staging_path.exists());
+    assert!(staging_path.file_name().unwrap().to_str().unwrap().starts_with(".axel_stage_"));
+
+    staging_file.write_all(b"Hello Staged World").unwrap();
+    staging_file.sync_all().unwrap();
+    drop(staging_file);
+
+    let pub_res = axel::engine::publish_staged_workspace_file(
+        &staging_path,
+        &temp_dir,
+        "sample.txt",
+        None,
+        &temp_dir,
+    )
+    .expect("Publish failed");
+
+    assert!(!staging_path.exists(), "Staging path must be cleaned up");
+    assert!(pub_res.path.exists());
+    assert_eq!(pub_res.file_name, "sample.txt");
+    assert_eq!(std::fs::read_to_string(&pub_res.path).unwrap(), "Hello Staged World");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_a10_entropy_token_generation() {
+    let t1 = axel::server::generate_secure_token();
+    let t2 = axel::server::generate_secure_token();
+    assert_eq!(t1.len(), 64);
+    assert_eq!(t2.len(), 64);
+    assert_ne!(t1, t2);
+    assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[test]
+fn test_a15_virtual_path_dotted_folder_preservation() {
+    use axel::index::virtual_tree::compute_virtual_paths;
+
+    let suggested = vec![
+        "Research.v2/Drafts".to_string(),
+        "Project.2026/Reports".to_string(),
+        "Reports/Annual.pdf".to_string(),
+    ];
+
+    let paths = compute_virtual_paths("thesis.pdf", "Research.v2", &suggested, "pdf");
+    assert!(paths.contains(&"Research.v2/Drafts/thesis.pdf".to_string()));
+    assert!(paths.contains(&"Project.2026/Reports/thesis.pdf".to_string()));
+    assert!(paths.contains(&"Reports/thesis.pdf".to_string()));
+    assert!(!paths.iter().any(|p| p.contains(".pdf/")));
+
+    // Fallback category normalization
+    let fb_paths = compute_virtual_paths("paper.docx", "Project.v3/Summary.docx", &[], "docx");
+    assert_eq!(fb_paths, vec!["Project.v3/paper.docx".to_string()]);
 }
 
 

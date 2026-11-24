@@ -23,7 +23,7 @@ use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
@@ -42,47 +42,50 @@ pub struct AppState {
     pub api_token: Option<String>,
     pub session_token: String,
     pub is_remote: bool,
+    pub remote_sessions: Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::time::Instant>>>,
+}
+
+impl AppState {
+    pub fn new(
+        config: Config,
+        index: Arc<Mutex<DocumentIndex>>,
+        ai: Arc<AiEngine>,
+        events_tx: broadcast::Sender<String>,
+        api_token: Option<String>,
+        session_token: String,
+        is_remote: bool,
+    ) -> Self {
+        Self {
+            config,
+            index,
+            ai,
+            events_tx,
+            api_token,
+            session_token,
+            is_remote,
+            remote_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        }
+    }
 }
 
 pub fn generate_secure_token() -> String {
     let mut buf = [0u8; 32];
-    if getrandom::getrandom(&mut buf).is_ok() {
-        return buf.iter().map(|b| format!("{:02x}", b)).collect();
-    }
-    use sha2::{Digest, Sha256};
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    let mut hasher = Sha256::new();
-    hasher.update(b"axel_secure_token_fallback_");
-    hasher.update(now.to_le_bytes());
-    hasher.update(pid.to_le_bytes());
-    format!("{:x}", hasher.finalize())
+    getrandom::getrandom(&mut buf)
+        .expect("FATAL: Failed to acquire cryptographically secure random bytes from OS entropy source");
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-pub fn is_request_authorized(
-    headers: &axum::http::HeaderMap,
-    expected_api_token: Option<&str>,
-    expected_session_token: &str,
-) -> bool {
+pub fn extract_token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
     // 1. Authorization: Bearer <token>
     if let Some(auth_val) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         if let Some(token) = auth_val.strip_prefix("Bearer ") {
-            let t = token.trim();
-            if t == expected_session_token || expected_api_token.map_or(false, |k| t == k) {
-                return true;
-            }
+            return Some(token.trim().to_string());
         }
     }
 
     // 2. X-API-Key: <token>
     if let Some(key_val) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-        let t = key_val.trim();
-        if t == expected_session_token || expected_api_token.map_or(false, |k| t == k) {
-            return true;
-        }
+        return Some(key_val.trim().to_string());
     }
 
     // 3. Cookie: axel_session=<token>
@@ -90,13 +93,24 @@ pub fn is_request_authorized(
         for cookie in cookie_hdr.split(';') {
             let cookie = cookie.trim();
             if let Some(val) = cookie.strip_prefix("axel_session=") {
-                if val == expected_session_token {
-                    return true;
-                }
+                return Some(val.trim().to_string());
             }
         }
     }
 
+    None
+}
+
+pub fn is_request_authorized(
+    headers: &axum::http::HeaderMap,
+    expected_api_token: Option<&str>,
+    expected_session_token: &str,
+) -> bool {
+    if let Some(token) = extract_token_from_headers(headers) {
+        if token == expected_session_token || expected_api_token.map_or(false, |k| token == k) {
+            return true;
+        }
+    }
     false
 }
 
@@ -112,16 +126,29 @@ async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // H01 & H02: Require authorization for all API routes
-    if !is_request_authorized(
-        req.headers(),
-        state.api_token.as_deref(),
-        &state.session_token,
-    ) {
+    // H01 & H02 & A10: Require authorization for all API routes with session lifecycle
+    let is_authed = if let Some(token) = extract_token_from_headers(req.headers()) {
+        if state.api_token.as_deref().map_or(false, |k| token == k) {
+            true
+        } else if !state.is_remote && token == state.session_token {
+            true
+        } else {
+            let sessions = state.remote_sessions.read().await;
+            if let Some(&expires_at) = sessions.get(&token) {
+                std::time::Instant::now() < expires_at
+            } else {
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if !is_authed {
         return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"Unauthorized: Valid API token or session required"}"#))
+            .body(Body::from(r#"{"error":"Unauthorized: Valid API token or active session required"}"#))
             .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response());
     }
 
@@ -173,6 +200,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/styles.css", get(serve_css))
         .route("/app.js", get(serve_js))
         .route("/api/auth/session", post(create_auth_session))
+        .route("/api/auth/logout", post(logout_session))
         .route("/api/graph", get(get_graph))
         .route("/api/documents", get(list_documents))
         .route("/api/documents/:hash", get(get_document_detail).delete(delete_document))
@@ -182,7 +210,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/scan", post(trigger_scan))
         .route("/api/upload", post(upload_document))
         .route("/api/events", get(sse_events))
-        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(110 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(cors)
         .with_state(state)
@@ -207,15 +235,15 @@ pub async fn run_server(config: Config, open_browser: bool) -> Result<(), Box<dy
     let ai = Arc::new(AiEngine::new(&config));
     let (events_tx, _) = broadcast::channel::<String>(64);
 
-    let state = AppState {
-        config: config.clone(),
+    let state = AppState::new(
+        config.clone(),
         index,
         ai,
         events_tx,
-        api_token: api_token.clone(),
-        session_token: session_token.clone(),
+        api_token.clone(),
+        session_token.clone(),
         is_remote,
-    };
+    );
 
     spawn_background_watcher(state.clone());
 
@@ -306,10 +334,12 @@ fn spawn_background_watcher(state: AppState) {
                             if !existing.physical_paths.contains(&path_str) {
                                 let mut dup_item = existing.clone();
                                 dup_item.path = path_str.clone();
+                                let backup_index = (*index).clone();
                                 index.upsert(dup_item);
                                 match index.save() {
                                     Ok(_) => true,
                                     Err(e) => {
+                                        *index = backup_index;
                                         eprintln!("[Watcher] Failed to save index: {e}");
                                         false
                                     }
@@ -332,10 +362,12 @@ fn spawn_background_watcher(state: AppState) {
                         let file_name = item.file.clone();
                         let save_ok = {
                             let mut index = state.index.lock().await;
+                            let backup_index = (*index).clone();
                             index.upsert(item);
                             match index.save() {
                                 Ok(_) => true,
                                 Err(e) => {
+                                    *index = backup_index;
                                     eprintln!("[Watcher] Failed to save index: {e}");
                                     false
                                 }
@@ -349,9 +381,16 @@ fn spawn_background_watcher(state: AppState) {
                 crate::watcher::WatchEvent::Removed(path) => {
                     let changed = {
                         let mut index = state.index.lock().await;
+                        let backup_index = (*index).clone();
                         if index.remove_path(&path) {
-                            let _ = index.save();
-                            true
+                            match index.save() {
+                                Ok(_) => true,
+                                Err(e) => {
+                                    *index = backup_index;
+                                    eprintln!("[Watcher] Failed to save index on remove: {e}");
+                                    false
+                                }
+                            }
                         } else {
                             false
                         }
@@ -429,14 +468,24 @@ async fn create_auth_session(
 ) -> Result<Response, (StatusCode, String)> {
     let t = payload.token.trim();
     let matches_api = state.api_token.as_deref().map_or(false, |k| k == t);
-    let matches_session = t == state.session_token;
+    let matches_session = !state.is_remote && t == state.session_token;
     if !matches_api && !matches_session {
         return Err((StatusCode::UNAUTHORIZED, "Invalid credential".to_string()));
     }
 
+    // A10: Authenticated session lifecycle for remote clients with per-client token and expiration
+    let client_token = generate_secure_token();
+    let expires_at = std::time::Instant::now() + std::time::Duration::from_secs(86400); // 24h
+    {
+        let mut sessions = state.remote_sessions.write().await;
+        let now = std::time::Instant::now();
+        sessions.retain(|_, exp| *exp > now);
+        sessions.insert(client_token.clone(), expires_at);
+    }
+
     let cookie = format!(
         "axel_session={}; Path=/; HttpOnly; SameSite=Strict",
-        state.session_token
+        client_token
     );
 
     Ok(Response::builder()
@@ -448,8 +497,25 @@ async fn create_auth_session(
         )
         .body(Body::from(format!(
             r#"{{"authenticated":true,"session_token":"{}"}}"#,
-            state.session_token
+            client_token
         )))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+}
+
+async fn logout_session(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    if let Some(token) = extract_token_from_headers(&headers) {
+        let mut sessions = state.remote_sessions.write().await;
+        sessions.remove(&token);
+    }
+    let expired_cookie = "axel_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Strict";
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::SET_COOKIE, HeaderValue::from_static(expired_cookie))
+        .body(Body::from(r#"{"logged_out":true}"#))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
 }
 
@@ -556,6 +622,98 @@ async fn delete_document(
     })))
 }
 
+fn open_and_verify_document_handle(
+    item: &IndexItem,
+    workspace: &Path,
+    max_bytes: u64,
+) -> Result<(std::fs::File, PathBuf, u64), (StatusCode, String)> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.push(PathBuf::from(&item.path));
+    for alias in &item.physical_paths {
+        let ap = PathBuf::from(alias);
+        if !candidates.contains(&ap) {
+            candidates.push(ap);
+        }
+    }
+
+    let mut found_oversized = false;
+    let mut actual_len = 0u64;
+
+    for cand in candidates {
+        let resolved = crate::config::resolve_workspace_path(&cand);
+        if !resolved.exists() || !crate::engine::is_path_inside_workspace(&resolved, workspace) {
+            continue;
+        }
+
+        let mut file = match std::fs::File::open(&resolved) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+
+        let meta = match file.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if !meta.is_file() {
+            continue;
+        }
+
+        let file_len = meta.len();
+        if file_len > max_bytes {
+            found_oversized = true;
+            actual_len = file_len;
+            continue;
+        }
+
+        // Validate hash on the open file handle before streaming
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        let mut read_ok = true;
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buffer[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    read_ok = false;
+                    break;
+                }
+            }
+        }
+
+        if !read_ok {
+            continue;
+        }
+
+        let computed_hash = format!("{:x}", hasher.finalize());
+        if computed_hash == item.hash {
+            if file.seek(SeekFrom::Start(0)).is_ok() {
+                return Ok((file, resolved, file_len));
+            }
+        }
+    }
+
+    if found_oversized {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "File size ({} MB) exceeds single-response download ceiling of {} MB",
+                actual_len / (1024 * 1024),
+                max_bytes / (1024 * 1024)
+            ),
+        ));
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        "File missing on disk or security verification failed (file hash modified / outside workspace)".to_string(),
+    ))
+}
+
 async fn get_document_raw(
     State(state): State<AppState>,
     AxumPath(hash): AxumPath<String>,
@@ -568,36 +726,13 @@ async fn get_document_raw(
             .ok_or_else(|| (StatusCode::NOT_FOUND, "Document not found".to_string()))?
     };
 
-    // H02, M03: Resolve verified live path with workspace containment and SHA-256 hash validation
-    let valid_path = crate::engine::resolve_verified_document_path(&item, &state.config.input_folder)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                "File missing on disk or security verification failed (file hash modified / outside workspace)".to_string(),
-            )
-        })?;
-
-    // H11: Check file size ceiling (100 MB) BEFORE reading into memory
-    let meta = tokio::fs::metadata(&valid_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to stat file: {e}")))?;
-
+    // A11: Check size, validate hash, and stream from a SINGLE open file handle without reopening
     const MAX_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
-    if meta.len() > MAX_DOWNLOAD_BYTES {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "File size ({} MB) exceeds single-response download ceiling of 100 MB",
-                meta.len() / (1024 * 1024)
-            ),
-        ));
-    }
+    let (std_file, valid_path, file_len) =
+        open_and_verify_document_handle(&item, &state.config.input_folder, MAX_DOWNLOAD_BYTES)?;
 
-    let file = tokio::fs::File::open(&valid_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to open file: {e}")))?;
-
-    let stream = tokio_util::io::ReaderStream::new(file);
+    let tokio_file = tokio::fs::File::from_std(std_file);
+    let stream = tokio_util::io::ReaderStream::new(tokio_file);
     let body = Body::from_stream(stream);
 
     let content_type = match valid_path
@@ -623,7 +758,7 @@ async fn get_document_raw(
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_LENGTH, meta.len().to_string())
+        .header(header::CONTENT_LENGTH, file_len.to_string())
         .header(header::CONTENT_DISPOSITION, disposition)
         .body(body)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Response error: {e}")))
@@ -678,15 +813,17 @@ async fn trigger_scan(State(state): State<AppState>) -> Result<Json<ScanSummary>
 
     if !items_to_insert.is_empty() {
         let mut index = state.index.lock().await;
+        let backup_index = (*index).clone();
         for item in items_to_insert {
             index.upsert(item);
         }
-        index.save().map_err(|e| {
-            (
+        if let Err(e) = index.save() {
+            *index = backup_index;
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to persist index after scan: {e}"),
-            )
-        })?;
+            ));
+        }
         emit_index_event(&state.events_tx, "scan", None);
     }
 
@@ -708,6 +845,7 @@ async fn upload_document(
     }
 
     let mut uploaded = Vec::new();
+    let mut created_files_on_disk: Vec<PathBuf> = Vec::new();
     let mut next_field_error = None;
 
     loop {
@@ -725,21 +863,36 @@ async fn upload_document(
             None => continue,
         };
 
-        let safe_name = Path::new(&raw_name)
+        let safe_name = match Path::new(&raw_name)
             .file_name()
             .and_then(|s| s.to_str())
             .filter(|s| !s.is_empty() && *s != "." && *s != "..")
-            .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid upload filename".to_string()))?
-            .to_string();
+        {
+            Some(s) => s.to_string(),
+            None => {
+                for p in &created_files_on_disk {
+                    let _ = std::fs::remove_file(p);
+                }
+                return Err((StatusCode::BAD_REQUEST, "Invalid upload filename".to_string()));
+            }
+        };
 
-        let data = field
-            .bytes()
-            .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read upload stream: {e}")))?;
+        let data = match field.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                for p in &created_files_on_disk {
+                    let _ = std::fs::remove_file(p);
+                }
+                return Err((StatusCode::BAD_REQUEST, format!("Failed to read upload stream: {e}")));
+            }
+        };
 
-        // H13: Enforce upload size ceiling (100 MB)
+        // H13: Enforce upload size ceiling (100 MB per file)
         const MAX_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
         if data.len() > MAX_UPLOAD_BYTES {
+            for p in &created_files_on_disk {
+                let _ = std::fs::remove_file(p);
+            }
             return Err((
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!(
@@ -754,34 +907,58 @@ async fn upload_document(
         upload_hasher.update(&data);
         let upload_hash = format!("{:x}", upload_hasher.finalize());
 
-        // H04: Atomic file publishing without replacement using exclusive creation handles
-        let exclusive = crate::engine::create_exclusive_workspace_file(
+        // A08: Stage file in hidden temporary staging file, flush & sync, then publish atomically
+        let (mut staging_file, staging_path) = match crate::engine::create_workspace_staging_file(&state.config.input_folder) {
+            Ok(res) => res,
+            Err(e) => {
+                for p in &created_files_on_disk {
+                    let _ = std::fs::remove_file(p);
+                }
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to create staging file: {e}"),
+                ));
+            }
+        };
+
+        use std::io::Write;
+        if let Err(e) = staging_file.write_all(&data).and_then(|_| staging_file.flush()).and_then(|_| staging_file.sync_all()) {
+            let _ = std::fs::remove_file(&staging_path);
+            for p in &created_files_on_disk {
+                let _ = std::fs::remove_file(p);
+            }
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to write upload data to staging file: {e}"),
+            ));
+        }
+        drop(staging_file);
+
+        let published = match crate::engine::publish_staged_workspace_file(
+            &staging_path,
             &state.config.input_folder,
             &safe_name,
             Some(&upload_hash),
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create destination file: {e}")))?;
-
-        let final_target_path = exclusive.path;
-        let final_file_name = exclusive.file_name;
-
-        if !exclusive.reused_existing {
-            use std::io::Write;
-            let mut file = exclusive.file;
-            if let Err(e) = file.write_all(&data) {
-                let _ = std::fs::remove_file(&final_target_path);
+            &state.config.input_folder,
+        ) {
+            Ok(res) => res,
+            Err(e) => {
+                let _ = std::fs::remove_file(&staging_path);
+                for p in &created_files_on_disk {
+                    let _ = std::fs::remove_file(p);
+                }
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to write upload data: {e}"),
+                    format!("Failed to publish staged upload: {e}"),
                 ));
             }
-            if let Err(e) = file.flush() {
-                let _ = std::fs::remove_file(&final_target_path);
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to flush upload data: {e}"),
-                ));
-            }
+        };
+
+        let final_target_path = published.path;
+        let final_file_name = published.file_name;
+
+        if !published.reused_existing {
+            created_files_on_disk.push(final_target_path.clone());
         }
 
         // M15 & H15: Run unified analysis (handling both code files and document files)
@@ -805,32 +982,48 @@ async fn upload_document(
     }
 
     if let Some(err) = next_field_error {
-        if uploaded.is_empty() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Failed to parse multipart upload stream: {err}"),
-            ));
+        for p in &created_files_on_disk {
+            let _ = std::fs::remove_file(p);
         }
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Failed to parse multipart upload stream: {err}"),
+        ));
     }
 
     if uploaded.is_empty() {
+        for p in &created_files_on_disk {
+            let _ = std::fs::remove_file(p);
+        }
         return Err((
             StatusCode::BAD_REQUEST,
             "No file provided in multipart upload".to_string(),
         ));
     }
 
-    {
+    // A13: Atomic index mutation and disk persistence rollback
+    let save_res = {
         let mut index = state.index.lock().await;
+        let backup_index = (*index).clone();
         for item in &uploaded {
             index.upsert(item.clone());
         }
-        index.save().map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to persist index after upload: {e}"),
-            )
-        })?;
+        if let Err(e) = index.save() {
+            *index = backup_index;
+            Err(e)
+        } else {
+            Ok(())
+        }
+    };
+
+    if let Err(e) = save_res {
+        for p in &created_files_on_disk {
+            let _ = std::fs::remove_file(p);
+        }
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to persist index after upload: {e}"),
+        ));
     }
 
     emit_index_event(

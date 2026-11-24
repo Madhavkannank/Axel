@@ -154,45 +154,91 @@ pub fn extract_text<P: AsRef<Path>>(path: P) -> Result<String, String> {
 const OCR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const MAX_OCR_OUTPUT_BYTES: u64 = 5 * 1024 * 1024; // 5 MB max output
 
-// H11: Run external OCR worker with bounded execution time and memory-capped output
+// H11, A07: Run external OCR worker with concurrent output draining, memory cap, execution timeout, and guaranteed child reaping
 fn run_command_bounded(
     mut cmd: Command,
     timeout: std::time::Duration,
     max_bytes: u64,
 ) -> Result<String, String> {
-    use std::io::Read;
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn OCR worker: {e}"))?;
 
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture stdout pipe".to_string())?;
+
+    // Drain stdout concurrently in a background thread so the child process never deadlocks
+    // when output exceeds the operating system's pipe buffer (typically 64 KB).
+    let reader_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let mut total_read = 0u64;
+
+        while total_read < max_bytes {
+            let to_read = (max_bytes - total_read).min(chunk.len() as u64) as usize;
+            match stdout.read(&mut chunk[..to_read]) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    buffer.extend_from_slice(&chunk[..n]);
+                    total_read += n as u64;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+
+        // If child outputs more than max_bytes, drain and discard remainder until EOF
+        // so child process does not block on writing to pipe.
+        let mut sink = [0u8; 8192];
+        while let Ok(n) = stdout.read(&mut sink) {
+            if n == 0 {
+                break;
+            }
+        }
+
+        buffer
+    });
+
     let start = std::time::Instant::now();
-    loop {
+    let mut exit_status = None;
+
+    while start.elapsed() < timeout {
         match child.try_wait() {
             Ok(Some(status)) => {
-                if status.success() {
-                    if let Some(stdout) = child.stdout.take() {
-                        let mut output = Vec::new();
-                        let _ = stdout.take(max_bytes).read_to_end(&mut output);
-                        return Ok(String::from_utf8_lossy(&output).trim().to_string());
-                    }
-                    return Ok(String::new());
-                } else {
-                    return Err(format!("OCR worker exited with status: {status}"));
-                }
+                exit_status = Some(status);
+                break;
             }
             Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("OCR worker timed out after {:?}", timeout));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(15));
             }
             Err(e) => {
                 let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader_handle.join();
                 return Err(format!("Error waiting for OCR worker: {e}"));
             }
         }
+    }
+
+    if exit_status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader_handle.join();
+        return Err(format!("OCR worker timed out after {:?}", timeout));
+    }
+
+    let status = exit_status.unwrap();
+    let output = reader_handle
+        .join()
+        .map_err(|_| "Reader thread panicked while capturing worker output".to_string())?;
+
+    if status.success() {
+        Ok(String::from_utf8_lossy(&output).trim().to_string())
+    } else {
+        Err(format!("OCR worker exited with status: {status}"))
     }
 }
 

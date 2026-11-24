@@ -9,9 +9,10 @@ from ai.groq_client import generate_keywords, generate_keywords_from_file_contex
 from metadata.image_meta import write_image_tags
 from metadata.pdf_meta import write_pdf_tags
 from metadata.docx_meta import write_docx_tags
-from utils.indexer import update_index, search_index, semantic_search_index
+from utils.indexer import update_index, search_index, semantic_search_index, rebuild_index
 from utils.watcher import start_watching
 from ai.embedding import generate_embedding
+from config import INPUT_FOLDER, TOP_K_RESULTS
 
 from ml.classifier import train_model, predict_category
 from ml.keywords import extract_keywords
@@ -20,19 +21,19 @@ def convert_keywords_to_windows_format(keywords_list):
     """Converts a list of keywords to Windows tag format."""
     return "; ".join(keywords_list)
 
-def process_single_file(file_path):
+def process_single_file(file_path, force=False):
     """Core AXEL pipeline for a single file."""
     if not validate_file(file_path):
         print(f"[ERROR] File not found or not accessible - {file_path}")
         return False
-        
+
     file_type = detect_file_type(file_path)
     if file_type == "unsupported":
         print("[ERROR] Unsupported file format.")
         return False
-        
-    # Check for existing metadata to avoid duplicates
-    if has_existing_metadata(file_path, file_type):
+
+    # Check for existing metadata to avoid duplicates unless force requested
+    if not force and has_existing_metadata(file_path, file_type):
         print(f"[INFO] Skipped already processed file: {file_path}")
         return False
         
@@ -80,10 +81,14 @@ def process_single_file(file_path):
         print(f"[INFO] Confidence: {confidence:.2f}")
         print(f"[INFO] Keywords (TF-IDF): {', '.join(ml_keywords)}")
 
-        prompt_text = preprocess_text(full_text)
-
         print("[INFO] Routing to LLM with ML hints...")
-        result = generate_keywords(prompt_text, ml_category=ml_category, ml_keywords=ml_keywords, file_name=os.path.basename(file_path))
+        result = generate_keywords(
+            full_text,
+            ml_category=ml_category,
+            ml_keywords=ml_keywords,
+            file_name=os.path.basename(file_path),
+            full_text=full_text,
+        )
         category = result.get("category", "Unknown")
         raw_keywords = result.get("keywords", [])
         target_kws = clean_keywords(raw_keywords, text=full_text)[:5]
@@ -160,33 +165,43 @@ def main():
     
     parser = argparse.ArgumentParser(description="AXEL: Automated Extraction & Enhanced Labeling")
     parser.add_argument("file", nargs="?", help="Path to single file for processing")
-    parser.add_argument("--watch", action="store_true", help="Monitor 'input_files' folder continuously")
+    parser.add_argument("--watch", action="store_true", help=f"Monitor '{INPUT_FOLDER}' folder continuously")
+    parser.add_argument("--rebuild", action="store_true", help="Rebuild the AXEL index by scanning INPUT_FOLDER")
     parser.add_argument("--search", type=str, help="Search the AXEL index for a keyword")
     parser.add_argument("--semantic", type=str, help="Semantically search the AXEL index via AI embeddings")
-    
+
     args = parser.parse_args()
-    
+
+    if args.rebuild:
+        print(f"[INFO] Rebuilding index from: {INPUT_FOLDER}")
+        indexed = rebuild_index(INPUT_FOLDER)
+        print(f"[INFO] Rebuild complete: {len(indexed)} files indexed.")
+        sys.exit(0)
+
     if args.search:
         results = search_index(args.search)
         print_search_results(args.search, results)
         sys.exit(0)
-        
+
     if args.semantic:
         query_emb = generate_embedding(args.semantic)
-        results = semantic_search_index(query_emb, top_k=5)
+        results = semantic_search_index(query_emb, top_k=TOP_K_RESULTS)
         print_semantic_search_results(args.semantic, results)
         sys.exit(0)
-        
+
     if args.watch:
-        start_watching("input_files", process_single_file)
+        start_watching(INPUT_FOLDER, process_single_file)
         sys.exit(0)
-        
+
     target_file = args.file
     if not target_file:
-        target_file = input("Enter file path, --watch, --search <keyword>, or --semantic <query>: ").strip()
-        
+        target_file = input("Enter file path, --watch, --rebuild, --search <keyword>, or --semantic <query>: ").strip()
+
     if target_file == "--watch":
-        start_watching("input_files", process_single_file)
+        start_watching(INPUT_FOLDER, process_single_file)
+    elif target_file == "--rebuild":
+        indexed = rebuild_index(INPUT_FOLDER)
+        print(f"[INFO] Rebuild complete: {len(indexed)} files indexed.")
     elif target_file.startswith("--search "):
         query = target_file.replace("--search ", "").strip('"\' ')
         results = search_index(query)
@@ -194,7 +209,7 @@ def main():
     elif target_file.startswith("--semantic "):
         query = target_file.replace("--semantic ", "").strip('"\' ')
         query_emb = generate_embedding(query)
-        results = semantic_search_index(query_emb, top_k=5)
+        results = semantic_search_index(query_emb, top_k=TOP_K_RESULTS)
         print_semantic_search_results(query, results)
     elif target_file:
         process_single_file(target_file)

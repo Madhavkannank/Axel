@@ -121,20 +121,23 @@ def safe_parse_llm_response(response_text):
         pass
     return None
 
-def generate_keywords(text, ml_category=None, ml_keywords=None, file_name=""):
+def generate_keywords(text, ml_category=None, ml_keywords=None, file_name="", full_text=None):
     """Sends text to Groq API and returns strict JSON output with model fallback."""
     fallback_response = {"category": "Unknown", "keywords": []}
 
-    if not text:
+    inspect_text = full_text if full_text is not None else text
+    if not inspect_text:
         return fallback_response
 
-    # Privacy shield: Check for high-risk identity documents on untruncated text
-    if is_identity_document(text, file_name):
+    # Privacy shield: Check for high-risk identity documents on UNTRUNCATED text (A14)
+    if is_identity_document(inspect_text, file_name):
         print("[PRIVACY] High-risk government identity document detected. Cloud LLM transmission prevented (H10).")
         return {"category": "Government ID", "keywords": ["identity", "confidential", "local_only"]}
 
-    # Redact PII and credentials before any cloud transmission
-    safe_text = redact_sensitive_data(text)
+    # Redact PII and credentials on the complete text before cloud excerpting/transmission
+    safe_untruncated = redact_sensitive_data(inspect_text)
+    from utils.file_handler import preprocess_text
+    safe_text = preprocess_text(safe_untruncated)
 
     if _key_missing_or_placeholder():
         print("[WARNING] GROQ_API_KEY missing/placeholder. Using safe fallback.")

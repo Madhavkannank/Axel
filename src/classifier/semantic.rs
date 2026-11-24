@@ -298,11 +298,11 @@ impl DynamicSemanticClassifier {
         // 6. Dynamic Category & Subtopic Resolution
         let (category, dynamic_subtopic) = if let Some(&(space, score, ref dominant_term)) = best_match {
             // Guard: Media files without substantial document text evidence stay under Media domain.
-            // Scanned images with rich OCR text (receipts, IDs, documents) can match semantic domains (H11).
-            // Media files must never falsely match Engineering / Code without genuine source code extension.
+            // Scanned images with rich OCR text (receipts, IDs, blueprints, diagrams) can match semantic domains (H11, A19).
+            // Media files with substantial extracted text and high semantic confidence for Engineering are accepted (A19).
             let has_document_text = !text.trim().is_empty() && text.trim().len() >= 20;
             let is_incompatible_media = (is_image || is_video || is_audio)
-                && (!has_document_text || score < 0.05 || (space.name == "Engineering" && !is_code))
+                && (!has_document_text || score < 0.05)
                 && space.name != "Media";
 
             if score > 0.02 && !is_incompatible_media {
@@ -572,5 +572,13 @@ mod tests {
         for vp in &vpaths {
             assert!(vp.ends_with(file));
         }
+    }
+
+    #[test]
+    fn test_media_with_engineering_document_text_classifies_as_engineering() {
+        let file = "engine_blueprint_scan.png";
+        let text = "Mechanical engineering blueprint: CAD architecture, hardware pipeline, firmware protocol and optimization framework.";
+        let (cat, _) = DynamicSemanticClassifier::classify(text, file, &["cad".to_string(), "architecture".to_string()], "png");
+        assert!(cat.starts_with("Engineering/"), "Scanned engineering blueprint should be Engineering, got: {}", cat);
     }
 }

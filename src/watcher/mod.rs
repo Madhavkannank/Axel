@@ -1,3 +1,4 @@
+use notify::event::{ModifyKind, RenameMode};
 use notify::{Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -70,42 +71,91 @@ impl FolderWatcher {
 
         while let Ok(event_result) = self.rx.try_recv() {
             if let Ok(event) = event_result {
+                let mut new_events = Vec::new();
                 match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) => {
-                        let mut new_events = Vec::new();
+                    // A06: Explicitly handle rename modes
+                    EventKind::Modify(ModifyKind::Name(rename_mode)) => match rename_mode {
+                        RenameMode::Both => {
+                            if event.paths.len() >= 2 {
+                                let from = &event.paths[0];
+                                let to = &event.paths[1];
+                                if self.is_processable_removal(from) {
+                                    new_events.push(WatchEvent::Removed(from.clone()));
+                                }
+                                if self.is_processable_file(to) {
+                                    new_events.push(WatchEvent::CreatedOrModified(to.clone()));
+                                }
+                            } else if let Some(p) = event.paths.first() {
+                                if p.exists() {
+                                    if self.is_processable_file(p) {
+                                        new_events.push(WatchEvent::CreatedOrModified(p.clone()));
+                                    }
+                                } else if self.is_processable_removal(p) {
+                                    new_events.push(WatchEvent::Removed(p.clone()));
+                                }
+                            }
+                        }
+                        RenameMode::From => {
+                            for path in event.paths {
+                                if self.is_processable_removal(&path) {
+                                    new_events.push(WatchEvent::Removed(path));
+                                }
+                            }
+                        }
+                        RenameMode::To => {
+                            for path in event.paths {
+                                if self.is_processable_file(&path) {
+                                    new_events.push(WatchEvent::CreatedOrModified(path));
+                                }
+                            }
+                        }
+                        RenameMode::Any | RenameMode::Other => {
+                            for path in event.paths {
+                                if path.exists() {
+                                    if self.is_processable_file(&path) {
+                                        new_events.push(WatchEvent::CreatedOrModified(path));
+                                    }
+                                } else if self.is_processable_removal(&path) {
+                                    new_events.push(WatchEvent::Removed(path));
+                                }
+                            }
+                        }
+                    },
+                    EventKind::Create(_) => {
                         for path in event.paths {
                             if self.is_processable_file(&path) {
                                 new_events.push(WatchEvent::CreatedOrModified(path));
                             }
                         }
-
-                        if !new_events.is_empty() {
-                            if let Ok(mut queue) = self.pending_events.lock() {
-                                for ev in new_events {
-                                    queue.push_back(ev);
-                                }
-                                return queue.pop_front();
+                    }
+                    EventKind::Remove(_) => {
+                        for path in event.paths {
+                            if self.is_processable_removal(&path) {
+                                new_events.push(WatchEvent::Removed(path));
                             }
                         }
                     }
-                    EventKind::Remove(_) => {
-                        let mut removed_events = Vec::new();
+                    EventKind::Modify(_) => {
                         for path in event.paths {
-                            if crate::engine::is_path_inside_workspace(&path, &self.watched_dir) {
-                                removed_events.push(WatchEvent::Removed(path));
-                            }
-                        }
-
-                        if !removed_events.is_empty() {
-                            if let Ok(mut queue) = self.pending_events.lock() {
-                                for ev in removed_events {
-                                    queue.push_back(ev);
+                            if path.exists() {
+                                if self.is_processable_file(&path) {
+                                    new_events.push(WatchEvent::CreatedOrModified(path));
                                 }
-                                return queue.pop_front();
+                            } else if self.is_processable_removal(&path) {
+                                new_events.push(WatchEvent::Removed(path));
                             }
                         }
                     }
                     _ => {}
+                }
+
+                if !new_events.is_empty() {
+                    if let Ok(mut queue) = self.pending_events.lock() {
+                        for ev in new_events {
+                            queue.push_back(ev);
+                        }
+                        return queue.pop_front();
+                    }
                 }
             }
         }
@@ -121,6 +171,35 @@ impl FolderWatcher {
             }
         }
         None
+    }
+
+    fn is_processable_removal(&self, path: &Path) -> bool {
+        if !crate::engine::is_path_inside_workspace(path, &self.watched_dir) {
+            return false;
+        }
+
+        let resolved_workspace = crate::config::resolve_workspace_path(&self.watched_dir);
+        let resolved_path = crate::config::resolve_workspace_path(path);
+        let rel_path = resolved_path
+            .strip_prefix(&resolved_workspace)
+            .unwrap_or(&resolved_path);
+        if let Some(parent) = rel_path.parent() {
+            for comp in parent.components() {
+                if let Some(name) = comp.as_os_str().to_str() {
+                    if crate::classifier::filter::should_skip_directory(name) || name == ".axel" {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+            if ext.ends_with("tmp") || ext.ends_with("bak") || ext.ends_with("lock") {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn is_processable_file(&self, path: &Path) -> bool {

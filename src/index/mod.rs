@@ -90,12 +90,52 @@ pub struct SearchResult {
     pub match_type: String, // "exact", "partial", "suggested"
 }
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
+pub struct IndexFileLock {
+    #[allow(dead_code)]
+    file: std::fs::File,
+}
+
+impl IndexFileLock {
+    pub fn acquire(lock_path: &Path) -> Result<Self, std::io::Error> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        #[cfg(unix)]
+        {
+            let fd = file.as_raw_fd();
+            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            if ret != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(Self { file })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for IndexFileLock {
+    fn drop(&mut self) {
+        let fd = self.file.as_raw_fd();
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DocumentIndex {
     file_path: PathBuf,
     items: Vec<IndexItem>,
     dirty: bool,
     initial_items_hashes: std::collections::HashSet<String>,
     deleted_hashes: std::collections::HashSet<String>,
+    removed_physical_paths: std::collections::HashSet<String>,
+    modified_hashes: std::collections::HashSet<String>,
+    pending_xattr_migrations: Vec<(PathBuf, String, Vec<String>, Vec<String>, String)>,
     recovered_from_backup: bool,
 }
 
@@ -103,6 +143,25 @@ impl Default for DocumentIndex {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn paths_match(indexed_str: &str, target: &Path, target_resolved: &Path) -> bool {
+    let indexed_path = Path::new(indexed_str);
+    if indexed_str == target.to_string_lossy() {
+        return true;
+    }
+    let indexed_resolved = resolve_workspace_path(indexed_path);
+    if indexed_resolved == target_resolved {
+        return true;
+    }
+    // Match workspace-relative paths
+    if indexed_path.is_relative() && target_resolved.ends_with(indexed_path) {
+        return true;
+    }
+    if target.is_relative() && indexed_resolved.ends_with(target) {
+        return true;
+    }
+    false
 }
 
 impl DocumentIndex {
@@ -117,9 +176,17 @@ impl DocumentIndex {
                     Ok(items) => items,
                     Err(err) => {
                         eprintln!(
-                            "[Index] Warning: Failed to parse index JSON at {}: {err}. Attempting recovery from backup...",
+                            "[Index] Warning: Failed to parse index JSON at {}: {err}. Preserving corrupt file and attempting recovery from backup...",
                             file_path.display()
                         );
+                        // A09: Preserve the corrupt file to .corrupt.<timestamp> for post-mortem analysis
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let corrupt_path = format!("{}.corrupt.{}", file_path.display(), now);
+                        let _ = std::fs::copy(&file_path, &corrupt_path);
+
                         if let Ok(bak_content) = std::fs::read_to_string(&bak_path) {
                             match serde_json::from_str::<Vec<IndexItem>>(&bak_content) {
                                 Ok(items) => {
@@ -132,11 +199,12 @@ impl DocumentIndex {
                                     items
                                 }
                                 Err(bak_err) => {
-                                    eprintln!("[Index] Backup file also invalid: {bak_err}");
+                                    eprintln!("[Index] CRITICAL: Backup file also invalid: {bak_err}. Unrecoverable corruption.");
                                     Vec::new()
                                 }
                             }
                         } else {
+                            eprintln!("[Index] CRITICAL: Backup file not found. Unrecoverable corruption.");
                             Vec::new()
                         }
                     }
@@ -165,7 +233,7 @@ impl DocumentIndex {
                 }
             }
         } else if std::path::Path::new(&bak_path).exists() {
-            // H06: Primary missing on disk; recover from valid backup
+            // Primary missing on disk; recover from valid backup
             if let Ok(bak_content) = std::fs::read_to_string(&bak_path) {
                 match serde_json::from_str::<Vec<IndexItem>>(&bak_content) {
                     Ok(items) => {
@@ -197,30 +265,35 @@ impl DocumentIndex {
             })
             .collect();
 
-        // H07: Versioned hash migration covering both JSON index and extended attributes.
-        // If an indexed item references a file > 16MB on disk that lacks version 2 xattr,
-        // recompute full SHA-256 and update xattrs and index record.
+        // A04: Versioned hash migration covering both JSON index and extended attributes.
+        // Files tagged before full SHA-256 lacked user.axel.hash_algo = "sha256".
+        // Recompute full SHA-256 and update in-memory index record.
+        // Extended attributes will be durably stamped when the index JSON is committed to disk (A04).
         let mut migrated_any = false;
+        let mut pending_xattr_migrations: Vec<(PathBuf, String, Vec<String>, Vec<String>, String)> = Vec::new();
         for item in &mut items {
             let p = Path::new(&item.path);
             if p.is_file() {
                 if let Ok(meta) = std::fs::metadata(p) {
                     if meta.len() > 16 * 1024 * 1024 {
+                        let algo_tag = xattr::get(p, crate::index::metadata::XATTR_HASH_ALGO).ok().flatten();
+                        let has_sha256 = algo_tag.as_deref() == Some(crate::index::metadata::CURRENT_HASH_ALGO);
                         let version_tag = xattr::get(p, crate::index::metadata::XATTR_VERSION).ok().flatten();
-                        let is_v2 = version_tag.as_deref() == Some(b"2");
-                        if !is_v2 {
+                        let is_v3 = version_tag.as_deref() == Some(crate::index::metadata::CURRENT_XATTR_VERSION);
+
+                        if !has_sha256 || !is_v3 {
                             if let Some(new_hash) = Self::compute_file_hash(p) {
                                 if new_hash != item.hash {
                                     item.hash = new_hash.clone();
                                     migrated_any = true;
                                 }
-                                let _ = crate::index::metadata::FileMetadataTag::write_to_file(
-                                    p,
-                                    &item.category,
-                                    &item.keywords,
-                                    &item.virtual_paths,
-                                    &item.hash,
-                                );
+                                pending_xattr_migrations.push((
+                                    p.to_path_buf(),
+                                    item.category.clone(),
+                                    item.keywords.clone(),
+                                    item.virtual_paths.clone(),
+                                    item.hash.clone(),
+                                ));
                             }
                         }
                     }
@@ -236,6 +309,9 @@ impl DocumentIndex {
             dirty: recovered_from_backup || migrated_any,
             initial_items_hashes,
             deleted_hashes: std::collections::HashSet::new(),
+            removed_physical_paths: std::collections::HashSet::new(),
+            modified_hashes: std::collections::HashSet::new(),
+            pending_xattr_migrations,
             recovered_from_backup,
         }
     }
@@ -248,6 +324,9 @@ impl DocumentIndex {
             dirty: false,
             initial_items_hashes,
             deleted_hashes: std::collections::HashSet::new(),
+            removed_physical_paths: std::collections::HashSet::new(),
+            modified_hashes: std::collections::HashSet::new(),
+            pending_xattr_migrations: Vec::new(),
             recovered_from_backup: false,
         }
     }
@@ -315,15 +394,33 @@ impl DocumentIndex {
             if self.items[idx].hash != item.hash {
                 let other = &mut self.items[idx];
                 let before_len = other.physical_paths.len();
+                let other_hash = other.hash.clone();
+                let removed_from_other: Vec<String> = other
+                    .physical_paths
+                    .iter()
+                    .filter(|p| claimed_paths.contains(&resolve_workspace_path(Path::new(p))))
+                    .cloned()
+                    .collect();
+
                 other.physical_paths.retain(|p| {
                     let r = resolve_workspace_path(Path::new(p));
                     !claimed_paths.contains(&r)
                 });
 
                 if other.physical_paths.len() < before_len {
+                    for rp in removed_from_other {
+                        self.removed_physical_paths.insert(
+                            resolve_workspace_path(Path::new(&rp))
+                                .to_string_lossy()
+                                .to_string(),
+                        );
+                    }
+                    self.modified_hashes.insert(other_hash.clone());
+
                     if other.physical_paths.is_empty() {
                         // All physical paths moved to the new record; drop the empty record
                         self.items.remove(idx);
+                        self.deleted_hashes.insert(other_hash);
                         continue;
                     } else {
                         // Promote remaining alias if primary was claimed
@@ -344,6 +441,9 @@ impl DocumentIndex {
             }
             idx += 1;
         }
+
+        self.modified_hashes.insert(item.hash.clone());
+        self.deleted_hashes.remove(&item.hash);
 
         // Now update or insert the item under its hash
         if let Some(pos) = self.items.iter().position(|i| i.hash == item.hash) {
@@ -394,7 +494,13 @@ impl DocumentIndex {
     pub fn remove_by_hash(&mut self, hash: &str) -> Option<IndexItem> {
         if let Some(pos) = self.items.iter().position(|i| i.hash == hash) {
             let removed = self.items.remove(pos);
+            for p in &removed.physical_paths {
+                self.removed_physical_paths.insert(
+                    resolve_workspace_path(Path::new(p)).to_string_lossy().to_string(),
+                );
+            }
             self.deleted_hashes.insert(hash.to_string());
+            self.modified_hashes.remove(hash);
             self.dirty = true;
             Some(removed)
         } else {
@@ -403,6 +509,15 @@ impl DocumentIndex {
     }
 
     pub fn remove_physical_copy(&mut self, hash: &str, path_to_remove: &str) -> bool {
+        self.remove_physical_copy_with_promotion(hash, path_to_remove, None)
+    }
+
+    pub fn remove_physical_copy_with_promotion(
+        &mut self,
+        hash: &str,
+        path_to_remove: &str,
+        promoted_path: Option<&str>,
+    ) -> bool {
         let path_resolved = resolve_workspace_path(Path::new(path_to_remove));
         if let Some(pos) = self.items.iter().position(|i| i.hash == hash) {
             let before = self.items[pos].physical_paths.len();
@@ -410,6 +525,9 @@ impl DocumentIndex {
                 p != path_to_remove && resolve_workspace_path(Path::new(p)) != path_resolved
             });
             if self.items[pos].physical_paths.len() < before {
+                self.removed_physical_paths.insert(path_resolved.to_string_lossy().to_string());
+                self.modified_hashes.insert(hash.to_string());
+
                 if self.items[pos].physical_paths.is_empty() {
                     self.items.remove(pos);
                     self.deleted_hashes.insert(hash.to_string());
@@ -420,7 +538,18 @@ impl DocumentIndex {
                     if self.items[pos].path == path_to_remove
                         || current_primary_resolved == path_resolved
                     {
-                        if let Some(next_p) = self.items[pos].physical_paths.first().cloned() {
+                        let chosen_path = promoted_path
+                            .and_then(|pp| {
+                                let pp_res = resolve_workspace_path(Path::new(pp));
+                                self.items[pos]
+                                    .physical_paths
+                                    .iter()
+                                    .find(|p| *p == pp || resolve_workspace_path(Path::new(p)) == pp_res)
+                                    .cloned()
+                            })
+                            .or_else(|| self.items[pos].physical_paths.first().cloned());
+
+                        if let Some(next_p) = chosen_path {
                             if let Some(fname) =
                                 Path::new(&next_p).file_name().and_then(|s| s.to_str())
                             {
@@ -437,28 +566,45 @@ impl DocumentIndex {
         false
     }
 
+    pub fn restore_item(&mut self, item: IndexItem) {
+        let hash = item.hash.clone();
+        for p in &item.physical_paths {
+            self.removed_physical_paths.remove(&resolve_workspace_path(Path::new(p)).to_string_lossy().to_string());
+        }
+        if let Some(pos) = self.items.iter().position(|i| i.hash == hash) {
+            self.items[pos] = item;
+        } else {
+            self.items.push(item);
+        }
+        self.deleted_hashes.remove(&hash);
+        self.modified_hashes.insert(hash);
+        self.dirty = true;
+    }
+
     /// Reconciles deletion of a file at `path` across all records.
     /// If surviving physical aliases exist, promotes one to primary path.
     /// If no aliases remain, removes the document record entirely from the index (M05).
     pub fn remove_path<P: AsRef<Path>>(&mut self, path: P) -> bool {
         let p = path.as_ref();
-        let p_str = p.to_string_lossy();
         let p_resolved = resolve_workspace_path(p);
+        let p_resolved_str = p_resolved.to_string_lossy().to_string();
         let mut modified = false;
 
         let mut idx = 0;
         while idx < self.items.len() {
-            let matches_primary = self.items[idx].path == p_str.as_ref()
-                || resolve_workspace_path(Path::new(&self.items[idx].path)) == p_resolved;
+            let matches_primary = paths_match(&self.items[idx].path, p, &p_resolved);
             let has_in_physical = self.items[idx].physical_paths.iter().any(|pp| {
-                pp == p_str.as_ref() || resolve_workspace_path(Path::new(pp)) == p_resolved
+                paths_match(pp, p, &p_resolved)
             });
 
             if matches_primary || has_in_physical {
                 let hash = self.items[idx].hash.clone();
                 self.items[idx].physical_paths.retain(|pp| {
-                    pp != p_str.as_ref() && resolve_workspace_path(Path::new(pp)) != p_resolved
+                    !paths_match(pp, p, &p_resolved)
                 });
+
+                self.removed_physical_paths.insert(p_resolved_str.clone());
+                self.modified_hashes.insert(hash.clone());
 
                 if self.items[idx].physical_paths.is_empty() {
                     self.items.remove(idx);
@@ -539,37 +685,52 @@ impl DocumentIndex {
             }
         }
 
-        // H05: Reconcile with on-disk state to prevent lost updates from concurrent writers/handles
+        // A03: Interprocess advisory lock to serialize read-merge-write-fsync-rename cycles
+        let lock_path = format!("{}.lock", self.file_path.display());
+        let _lock = IndexFileLock::acquire(Path::new(&lock_path))?;
+
+        // A02: Reconcile with on-disk state using explicit path and metadata mutation deltas
         if self.file_path.exists() {
             if let Ok(disk_content) = std::fs::read_to_string(&self.file_path) {
                 if let Ok(disk_items) = serde_json::from_str::<Vec<IndexItem>>(&disk_content) {
                     for disk_item in disk_items {
-                        // If we explicitly deleted this hash, do not revive it
+                        // If we explicitly deleted this hash in self, never resurrect it
                         if self.deleted_hashes.contains(&disk_item.hash) {
                             continue;
                         }
 
                         if let Some(pos) = self.items.iter().position(|i| i.hash == disk_item.hash) {
-                            // Merge physical paths that another writer added
                             let local = &mut self.items[pos];
+                            // Merge physical paths that another writer added, filtering out paths explicitly removed in self
                             for dp in disk_item.physical_paths {
                                 let dp_res = resolve_workspace_path(Path::new(&dp));
+                                let dp_res_str = dp_res.to_string_lossy().to_string();
+                                if self.removed_physical_paths.contains(&dp_res_str) {
+                                    continue;
+                                }
                                 if !local.physical_paths.iter().any(|lp| resolve_workspace_path(Path::new(lp)) == dp_res) {
                                     local.physical_paths.push(dp);
                                 }
                             }
                             local.is_duplicate = local.physical_paths.len() > 1;
 
-                            // Merge virtual paths
-                            for dvp in disk_item.virtual_paths {
-                                if !local.virtual_paths.contains(&dvp) {
-                                    local.virtual_paths.push(dvp);
-                                }
+                            // If self did NOT modify this item, adopt any refreshed metadata from disk
+                            if !self.modified_hashes.contains(&disk_item.hash) {
+                                local.category = disk_item.category;
+                                local.virtual_paths = disk_item.virtual_paths;
+                                local.keywords = disk_item.keywords;
                             }
                         } else if !self.initial_items_hashes.contains(&disk_item.hash) {
                             // An independent handle/writer inserted this item while self was open!
-                            // Preserve the concurrent update without dropping it.
-                            self.items.push(disk_item);
+                            // Preserve without dropping, but exclude any paths explicitly removed in self
+                            let mut item_to_add = disk_item;
+                            item_to_add.physical_paths.retain(|p| {
+                                let res = resolve_workspace_path(Path::new(p)).to_string_lossy().to_string();
+                                !self.removed_physical_paths.contains(&res)
+                            });
+                            if !item_to_add.physical_paths.is_empty() {
+                                self.items.push(item_to_add);
+                            }
                         }
                     }
                 }
@@ -606,11 +767,11 @@ impl DocumentIndex {
             file.sync_all()?;
         }
 
-        // H06: Preserve validated backup generations.
-        // NEVER overwrite a valid backup with a corrupt primary!
+        // A09: Preserve validated backup generations.
+        // Validate against Vec<IndexItem> schema, NEVER arbitrary serde_json::Value!
         if self.file_path.exists() {
             let primary_is_valid = match std::fs::read_to_string(&self.file_path) {
-                Ok(content) => serde_json::from_str::<serde_json::Value>(&content).is_ok(),
+                Ok(content) => serde_json::from_str::<Vec<IndexItem>>(&content).is_ok(),
                 Err(_) => false,
             };
             if primary_is_valid {
@@ -624,8 +785,15 @@ impl DocumentIndex {
             return Err(e);
         }
 
+        // A04: Commit pending xattr migrations now that index JSON is durably written to disk
+        for (p, cat, kws, vpaths, h) in self.pending_xattr_migrations.drain(..) {
+            let _ = crate::index::metadata::FileMetadataTag::write_to_file(&p, &cat, &kws, &vpaths, &h);
+        }
+
         self.initial_items_hashes = self.items.iter().map(|i| i.hash.clone()).collect();
         self.deleted_hashes.clear();
+        self.removed_physical_paths.clear();
+        self.modified_hashes.clear();
         self.dirty = false;
         self.recovered_from_backup = false;
         Ok(())

@@ -115,6 +115,7 @@
   let height = 0;
   let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let searchTimer = null;
+  let activeSearchId = 0;
 
   function escapeHtml(str) {
     return String(str)
@@ -827,6 +828,7 @@
   }
 
   async function runSemanticSearch(query) {
+    const thisSearchId = ++activeSearchId;
     const q = query.trim();
     state.searchQuery = q;
     el.btnInputClear.classList.toggle('hidden', q.length === 0);
@@ -840,7 +842,16 @@
 
     try {
       const res = await apiFetch(`/api/search?q=${encodeURIComponent(q)}`);
+      if (thisSearchId !== activeSearchId) {
+        return; // Stale query superseded by subsequent keystroke
+      }
+      if (!res.ok) {
+        throw new Error(`Search request failed with status ${res.status}`);
+      }
       const data = await res.json();
+      if (thisSearchId !== activeSearchId) {
+        return; // Stale query superseded
+      }
       state.searchMatches = new Map(data.results.map((r) => [r.item.hash, r]));
       el.searchSummary.textContent = `${data.total} semantic ${data.total === 1 ? 'match' : 'matches'} for "${q}"`;
 
@@ -863,7 +874,9 @@
       el.searchPopover.classList.remove('hidden');
       if (state.view === 'grid') renderGridView();
     } catch (err) {
-      showToast(`Search failed: ${err.message}`);
+      if (thisSearchId === activeSearchId) {
+        showToast(`Search failed: ${err.message}`);
+      }
     }
   }
 
@@ -947,6 +960,10 @@
   async function triggerScan() {
     try {
       const res = await apiFetch('/api/scan', { method: 'POST' });
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(errorText || `Scan failed with status ${res.status}`);
+      }
       const data = await res.json();
       let msg = `Scan complete: ${data.indexed} indexed, ${data.skipped} unchanged`;
       if (data.truncated) {

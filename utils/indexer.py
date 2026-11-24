@@ -292,16 +292,28 @@ def get_stats():
         'most_common_count': most_common_count
     }
 
-def rebuild_index():
+def rebuild_index(folder=None):
+    """Rebuilds the index by scanning and re-indexing all documents in the target folder (A18)."""
     global _index_cache, _index_dirty
+    target_folder = folder or INPUT_FOLDER
+    if not os.path.exists(target_folder):
+        print(f"[WARNING] Rebuild target folder does not exist: {target_folder}")
+        return []
+
     _index_cache = []
     _index_dirty = True
-    if not os.path.exists(INPUT_FOLDER):
-        return
-    for fname in os.listdir(INPUT_FOLDER):
-        fpath = os.path.join(INPUT_FOLDER, fname)
-        if not os.path.isfile(fpath):
-            continue
-        # The main pipeline should be called externally to process and re-index
-        pass
     _save_index()
+
+    from main import process_single_file
+    indexed_files = []
+    for root, _, files in os.walk(target_folder):
+        for fname in sorted(files):
+            fpath = os.path.join(root, fname)
+            if not os.path.isfile(fpath) or fname.startswith("."):
+                continue
+            try:
+                if process_single_file(fpath, force=True):
+                    indexed_files.append(fpath)
+            except Exception as e:
+                print(f"[ERROR] Failed to index {fpath} during rebuild: {e}")
+    return indexed_files

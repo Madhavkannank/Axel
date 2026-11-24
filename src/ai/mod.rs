@@ -102,9 +102,9 @@ impl AiEngine {
                     .await
                 {
                     let is_code_ext = crate::classifier::filter::is_script_extension(&clean_ext);
+                    // A19: Do not reject Engineering as code — engineering documents, CAD files, and technical specs are valid Engineering topics
                     let is_falsely_categorized_as_code = !is_code_ext
                         && (llm_res.category.eq_ignore_ascii_case("code")
-                            || llm_res.category.eq_ignore_ascii_case("engineering")
                             || llm_res.category.starts_with("Code/"));
 
                     // Dynamic fallback if LLM returned empty, generic, or invalid category
@@ -208,7 +208,15 @@ impl AiEngine {
 
         if cloud_code_opt_in && !has_secrets {
             if let Some(ref client) = self.groq {
-                let code_snippet: String = sanitized_code.lines().take(60).collect::<Vec<_>>().join("\n");
+                // A19: Structural sampling up to 200 lines instead of 60 lines
+                let all_lines: Vec<&str> = sanitized_code.lines().collect();
+                let code_snippet: String = if all_lines.len() <= 200 {
+                    all_lines.join("\n")
+                } else {
+                    let head = &all_lines[..120];
+                    let tail = &all_lines[all_lines.len() - 80..];
+                    format!("{}\n// ... [trimmed for context] ...\n{}", head.join("\n"), tail.join("\n"))
+                };
                 let clean_file_name = crate::classifier::privacy::redact_filename(file_name);
                 let clean_symbols = crate::classifier::privacy::sanitize_code_symbols(&symbols.symbols);
                 let clean_tokens = crate::classifier::privacy::sanitize_code_symbols(&symbols.tokens);

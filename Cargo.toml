@@ -45,6 +45,7 @@ rfd = { version = "0.18", default-features = false, features = ["xdg-portal", "w
 trash = "5.4"
 xattr = "1.7.0"
 getrandom = "0.2"
+libc = "0.2"
 
 [dev-dependencies]
 libc = "0.2"

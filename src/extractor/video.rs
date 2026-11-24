@@ -370,10 +370,12 @@ fn probe_container_headers(video_path: &Path) -> Result<VideoIntelligence, Strin
     Ok(intel)
 }
 
-/// Extract up to 128 KB of embedded subtitle stream using ffmpeg without video transcoding
+/// Extract up to 128 KB of embedded subtitle stream using ffmpeg without video transcoding,
+/// bounding process output during capture so ffmpeg never blocks on OS pipe buffer (A11).
 fn extract_embedded_subtitle_stream(video_path: &Path) -> Option<String> {
-    let output = Command::new("ffmpeg")
-        .arg("-v")
+    use std::io::Read;
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-v")
         .arg("quiet")
         .arg("-i")
         .arg(video_path)
@@ -382,16 +384,73 @@ fn extract_embedded_subtitle_stream(video_path: &Path) -> Option<String> {
         .arg("-f")
         .arg("webvtt")
         .arg("-") // Stream to stdout
-        .output()
-        .ok()?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
 
-    if !output.status.success() || output.stdout.is_empty() {
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+
+    const MAX_SUBTITLE_BYTES: u64 = 128 * 1024;
+    let reader_handle = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let mut total_read = 0u64;
+        while total_read < MAX_SUBTITLE_BYTES {
+            let to_read = (MAX_SUBTITLE_BYTES - total_read).min(chunk.len() as u64) as usize;
+            match stdout.read(&mut chunk[..to_read]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buffer.extend_from_slice(&chunk[..n]);
+                    total_read += n as u64;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        let mut sink = [0u8; 8192];
+        while let Ok(n) = stdout.read(&mut sink) {
+            if n == 0 {
+                break;
+            }
+        }
+        buffer
+    });
+
+    let timeout = std::time::Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    let mut exit_status = None;
+    while start.elapsed() < timeout {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader_handle.join();
+                return None;
+            }
+        }
+    }
+
+    if exit_status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader_handle.join();
         return None;
     }
 
-    // Limit buffer to 128KB to maintain <10MB RAM
-    let max_len = output.stdout.len().min(128 * 1024);
-    let raw = String::from_utf8_lossy(&output.stdout[..max_len]);
+    let status = exit_status.unwrap();
+    let output = reader_handle.join().ok()?;
+    if !status.success() || output.is_empty() {
+        return None;
+    }
+
+    let raw = String::from_utf8_lossy(&output);
     let cleaned = clean_subtitle_cues(&raw);
     if cleaned.trim().is_empty() {
         None

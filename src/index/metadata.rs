@@ -8,6 +8,10 @@ pub const XATTR_VPATHS: &str = "user.axel.vpaths";
 pub const XATTR_HASH: &str = "user.axel.hash";
 pub const XATTR_MTIME: &str = "user.axel.mtime";
 pub const XATTR_VERSION: &str = "user.axel.version";
+pub const XATTR_HASH_ALGO: &str = "user.axel.hash_algo";
+
+pub const CURRENT_XATTR_VERSION: &[u8] = b"3";
+pub const CURRENT_HASH_ALGO: &[u8] = b"sha256";
 
 pub struct FileMetadataTag;
 
@@ -42,13 +46,16 @@ impl FileMetadataTag {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        // H07: Validate schema version for large files (> 16MB).
-        // Legacy version 1 files used sparse head+mid+tail signatures rather than full SHA-256.
-        // If file > 16MB and user.axel.version != "2", reject cached xattr so normal scan re-indexes with full SHA-256.
+        // A04: Validate hash algorithm separately from schema version.
+        // Legacy versions used sparse head+mid+tail signatures rather than full SHA-256
+        // even when user.axel.version was "2".
+        // Require explicit user.axel.hash_algo = "sha256" and modern schema version.
         let is_large_file = fs_metadata.len() > 16 * 1024 * 1024;
         let version_tag = xattr::get(path, XATTR_VERSION).ok().flatten();
-        let is_version_2 = version_tag.as_deref() == Some(b"2");
-        if is_large_file && !is_version_2 {
+        let algo_tag = xattr::get(path, XATTR_HASH_ALGO).ok().flatten();
+        let has_sha256_algo = algo_tag.as_deref() == Some(CURRENT_HASH_ALGO);
+        let is_modern_version = matches!(version_tag.as_deref(), Some(b"2") | Some(b"3"));
+        if is_large_file && (!has_sha256_algo || !is_modern_version) {
             return None;
         }
 
@@ -182,8 +189,9 @@ impl FileMetadataTag {
             }
         }
 
-        // Version 2 schema
-        let _ = xattr::set(path, XATTR_VERSION, b"2");
+        // Version 3 schema with explicit hash algorithm (A04)
+        let _ = xattr::set(path, XATTR_VERSION, CURRENT_XATTR_VERSION);
+        let _ = xattr::set(path, XATTR_HASH_ALGO, CURRENT_HASH_ALGO);
 
         Ok(())
     }
@@ -196,5 +204,6 @@ impl FileMetadataTag {
         let _ = xattr::remove(path, XATTR_HASH);
         let _ = xattr::remove(path, XATTR_MTIME);
         let _ = xattr::remove(path, XATTR_VERSION);
+        let _ = xattr::remove(path, XATTR_HASH_ALGO);
     }
 }
