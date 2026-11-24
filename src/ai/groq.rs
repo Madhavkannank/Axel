@@ -267,3 +267,106 @@ impl GroqClient {
         None
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroqKeyVerification {
+    pub valid: bool,
+    pub latency_ms: u64,
+    pub available_models: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Deserialize)]
+struct GroqModelsListResponse {
+    #[serde(default)]
+    data: Vec<GroqModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct GroqModelEntry {
+    id: String,
+    #[serde(default)]
+    active: Option<bool>,
+}
+
+/// Dynamically tests a Groq API key against the live Groq models endpoint.
+/// Measures real round-trip latency, validates authorization, and dynamically
+/// discovers all available models for the user's account without hardcoded lists.
+pub async fn test_groq_api_key(api_key: &str) -> Result<GroqKeyVerification, String> {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return Ok(GroqKeyVerification {
+            valid: false,
+            latency_ms: 0,
+            available_models: Vec::new(),
+            message: "API key is empty".to_string(),
+        });
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("Failed to initialize HTTP client: {e}"))?;
+
+    let start = std::time::Instant::now();
+    let resp = client
+        .get("https://api.groq.com/openai/v1/models")
+        .header("Authorization", format!("Bearer {trimmed}"))
+        .header("User-Agent", "Axel-Engine/0.2.0")
+        .send()
+        .await
+        .map_err(|e| format!("Network request failed: {e}"))?;
+
+    let latency_ms = start.elapsed().as_millis() as u64;
+    let status = resp.status();
+
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(GroqKeyVerification {
+            valid: false,
+            latency_ms,
+            available_models: Vec::new(),
+            message: "Authentication failed (401 Unauthorized). Please check your Groq API key.".to_string(),
+        });
+    }
+
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Ok(GroqKeyVerification {
+            valid: false,
+            latency_ms,
+            available_models: Vec::new(),
+            message: "Access forbidden (403 Forbidden). Your key may lack permissions.".to_string(),
+        });
+    }
+
+    if !status.is_success() {
+        return Ok(GroqKeyVerification {
+            valid: false,
+            latency_ms,
+            available_models: Vec::new(),
+            message: format!("Groq API returned HTTP {status}"),
+        });
+    }
+
+    let body = resp
+        .json::<GroqModelsListResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse models JSON response: {e}"))?;
+
+    let mut models: Vec<String> = body
+        .data
+        .into_iter()
+        .filter(|m| m.active.unwrap_or(true))
+        .map(|m| m.id)
+        .collect();
+
+    models.sort();
+
+    let count = models.len();
+    Ok(GroqKeyVerification {
+        valid: true,
+        latency_ms,
+        available_models: models,
+        message: format!("API key verified successfully. {count} dynamic models discovered ({latency_ms}ms)."),
+    })
+}
+

@@ -9,6 +9,7 @@ venv/
 .env
 .env.local
 axel_index.json
+axel_index.json.*
 *.tmp
 ml/model.pkl
 input_files/

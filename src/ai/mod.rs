@@ -5,7 +5,7 @@ use crate::classifier::{
     KeywordExtractor,
 };
 use crate::config::Config;
-pub use groq::{CategoryResult, GroqClient};
+pub use groq::{test_groq_api_key, CategoryResult, GroqClient, GroqKeyVerification};
 
 pub struct AiEngine {
     groq: Option<GroqClient>,

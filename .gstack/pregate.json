@@ -7,6 +7,7 @@
     "check_ready.py": [],
     "ui/app.js": [],
     "ui/index.html": [],
+    "ui/styles.css": [],
     "run_test.py": [],
     "test_desktop_app.py": []
   },

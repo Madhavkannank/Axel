@@ -291,24 +291,153 @@
           </div>
         </aside>
 
-        <!-- Inline Engine Telemetry Drawer -->
-        <aside class="inspector-drawer inspector-drawer-sm hidden" id="settingsDrawer" aria-label="Engine telemetry">
+        <!-- Interactive Engine Settings & Telemetry Drawer -->
+        <aside class="inspector-drawer inspector-drawer-settings hidden" id="settingsDrawer" aria-label="Engine settings and telemetry">
           <div class="inspector-header">
             <div class="inspector-title-group">
-              <span class="inspector-cat-badge">Rust Engine v0.2.0</span>
-              <h2>Engine Telemetry</h2>
+              <span class="inspector-cat-badge" id="settingsEngineBadge">AXEL v0.2.0</span>
+              <h2>Settings & Telemetry</h2>
             </div>
-            <button class="icon-btn" id="btnCloseSettingsModal" type="button" aria-label="Close engine telemetry">
+            <button class="icon-btn" id="btnCloseSettingsModal" type="button" aria-label="Close settings">
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
               </svg>
             </button>
           </div>
-          <div class="telemetry-grid" id="telemetryGrid"></div>
-          <div class="inspector-footer">
-            <span class="telemetry-note">Shortcuts: <code>/</code> Search &middot; <code>Esc</code> Close</span>
-            <button class="btn-primary-copper" id="btnSettingsScan" type="button">Run Full Scan</button>
+
+          <!-- Settings Tab Bar -->
+          <div class="settings-tabs" role="tablist">
+            <button class="settings-tab active" id="tabBtnAi" type="button" role="tab" data-tab="settingsTabAi">AI & Cloud</button>
+            <button class="settings-tab" id="tabBtnExtraction" type="button" role="tab" data-tab="settingsTabExtraction">Extraction & OCR</button>
+            <button class="settings-tab" id="tabBtnAppearance" type="button" role="tab" data-tab="settingsTabAppearance">Appearance & Paths</button>
+            <button class="settings-tab" id="tabBtnTelemetry" type="button" role="tab" data-tab="settingsTabTelemetry">Telemetry</button>
+          </div>
+
+          <!-- Tab 1: AI & Cloud -->
+          <div class="settings-tab-content" id="settingsTabAi">
+            <div class="form-group">
+              <label for="cfgGroqApiKey" class="form-label">
+                <span>Groq API Key</span>
+                <span class="form-label-desc">Cloud LLM acceleration for dynamic categorization</span>
+              </label>
+              <div class="input-with-button">
+                <input type="password" id="cfgGroqApiKey" class="form-input" placeholder="gsk_..." autocomplete="off">
+                <button type="button" class="btn-input-action" id="btnToggleKeyVis" title="Show/Hide API Key">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                    <circle cx="12" cy="12" r="3"></circle>
+                  </svg>
+                </button>
+                <button type="button" class="btn-glass btn-sm" id="btnTestGroqKey">Test Key</button>
+              </div>
+              <div class="key-test-feedback hidden" id="keyTestFeedback"></div>
+            </div>
+
+            <div class="form-group">
+              <label for="cfgModelSelect" class="form-label">
+                <span>Active LLM Model</span>
+                <span class="form-label-desc">Discovered dynamically from your Groq account</span>
+              </label>
+              <select id="cfgModelSelect" class="form-select"></select>
+            </div>
+
+            <div class="form-group">
+              <label class="toggle-control">
+                <input type="checkbox" id="cfgForceOffline">
+                <span class="toggle-switch"></span>
+                <span class="toggle-label">
+                  <strong>Force Offline Mode (Privacy Shield)</strong>
+                  <small>Bypass all cloud calls; classify via mathematical local centroids</small>
+                </span>
+              </label>
+            </div>
+
+            <div class="form-group">
+              <label class="toggle-control">
+                <input type="checkbox" id="cfgEnableCloudCode">
+                <span class="toggle-switch"></span>
+                <span class="toggle-label">
+                  <strong>Enable Cloud Code Classification</strong>
+                  <small>Allow outbound sanitized code snippets to Groq (defaults to local only)</small>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Tab 2: Extraction & OCR -->
+          <div class="settings-tab-content hidden" id="settingsTabExtraction">
+            <div class="form-group">
+              <label class="toggle-control">
+                <input type="checkbox" id="cfgEnableOcr">
+                <span class="toggle-switch"></span>
+                <span class="toggle-label">
+                  <strong>Enable Tesseract OCR</strong>
+                  <small>Optical character recognition on scanned images and documents</small>
+                </span>
+              </label>
+            </div>
+
+            <div class="form-group">
+              <label for="cfgMaxFileSize" class="form-label">
+                <span>Max File Size Ceiling</span>
+                <span class="form-label-desc" id="maxFileSizeLabel">100 MB</span>
+              </label>
+              <input type="range" id="cfgMaxFileSize" min="10" max="500" step="10" value="100" class="form-range">
+            </div>
+
+            <div class="form-group">
+              <label for="cfgExcludedPatterns" class="form-label">
+                <span>Excluded Patterns</span>
+                <span class="form-label-desc">Comma-separated folder names or glob patterns ignored during scans</span>
+              </label>
+              <input type="text" id="cfgExcludedPatterns" class="form-input" placeholder=".git, node_modules, target, tmp">
+            </div>
+          </div>
+
+          <!-- Tab 3: Appearance & Paths -->
+          <div class="settings-tab-content hidden" id="settingsTabAppearance">
+            <div class="form-group">
+              <label for="cfgThemeSelect" class="form-label">
+                <span>Visual Theme</span>
+                <span class="form-label-desc">Color palette and atmospheric styling</span>
+              </label>
+              <select id="cfgThemeSelect" class="form-select">
+                <option value="Nebula Obsidian">Nebula Obsidian (Default Dark)</option>
+                <option value="Cosmic Slate">Cosmic Slate</option>
+                <option value="Aurora Light">Aurora Light</option>
+                <option value="Midnight Blue">Midnight Blue</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">
+                <span>Workspace Folder</span>
+                <span class="form-label-desc" id="lblInputFolder">./documents</span>
+              </label>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">
+                <span>Index File</span>
+                <span class="form-label-desc" id="lblIndexFile">axel_index.json</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Tab 4: Telemetry -->
+          <div class="settings-tab-content hidden" id="settingsTabTelemetry">
+            <div class="telemetry-grid" id="telemetryGrid"></div>
+            <div style="margin-top: 14px;">
+              <button class="btn-primary-copper btn-full" id="btnSettingsScan" type="button">Run Full Scan</button>
+            </div>
+          </div>
+
+          <!-- Settings Footer -->
+          <div class="inspector-footer settings-footer">
+            <button class="btn-input-action" id="btnOpenGuideFromSettings" type="button" style="padding: 6px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid var(--border-subtle);" title="View Architecture & Privacy Guide">Guide</button>
+            <span class="telemetry-note" id="settingsSaveStatus" style="flex: 1; text-align: center;">Settings persist to disk atomically</span>
+            <button class="btn-primary-copper" id="btnSaveSettings" type="button">Save Settings</button>
           </div>
         </aside>
       </main>
@@ -340,6 +469,130 @@
 
   <!-- Hidden File Input for Upload / Drop-Dock -->
   <input type="file" id="hiddenFileInput" multiple accept=".pdf,.docx,.doc,.odt,.rtf,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.yaml,.yml,.toml,.xml,.html,.htm,.css,.scss,.js,.mjs,.cjs,.jsx,.ts,.tsx,.py,.rs,.go,.java,.c,.cpp,.cc,.cxx,.h,.hpp,.hxx,.sh,.bash,.zsh,.sql,.log,.ini,.cfg,.conf,.tex,.bib,.org,.rst,.diff,.patch,.lua,.rb,.php,.r,.kt,.swift,.pl,.pm,.jpg,.jpeg,.png,.tiff,.tif,.bmp,.webp,.gif,.svg,.ico,.mp4,.mkv,.avi,.mov,.webm,.flv,.m4v,.wmv,.mp3,.wav,.flac,.ogg,.m4a,.aac,.opus,.wma,.zip,.tar,.gz,.bz2,.xz,.7z,.rar,.zst,.tgz" hidden>
+
+  <!-- Architecture & Onboarding Guide Modal -->
+  <div class="guide-modal-overlay hidden" id="guideModalOverlay">
+    <div class="guide-modal" role="dialog" aria-labelledby="guideTitle" aria-modal="true">
+      <div class="guide-modal-header">
+        <div class="guide-modal-title-group">
+          <svg class="guide-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"></circle>
+            <circle cx="19" cy="5" r="2"></circle>
+            <circle cx="5" cy="19" r="2"></circle>
+            <path d="M10.4 10.4L6.4 14.4M17.6 6.4L13.6 10.4"></path>
+          </svg>
+          <div>
+            <h2 id="guideTitle">AXEL Architecture & Getting Started Guide</h2>
+            <p class="guide-subtitle">High-performance desktop intelligence, security boundaries, and Groq setup</p>
+          </div>
+        </div>
+        <button class="icon-btn" id="btnCloseGuideModal" type="button" aria-label="Close guide modal">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="6"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div style="padding: 12px 24px 0 24px; border-bottom: 1px solid var(--border-hairline);">
+        <div class="settings-tabs" id="guideTabs" style="border-bottom: none; padding-bottom: 10px;">
+          <button class="settings-tab guide-tab active" data-guidetab="guideTabArchitecture" type="button">How It Works</button>
+          <button class="settings-tab guide-tab" data-guidetab="guideTabPermissions" type="button">Native Permissions</button>
+          <button class="settings-tab guide-tab" data-guidetab="guideTabPrivacy" type="button">Privacy & Security</button>
+          <button class="settings-tab guide-tab" data-guidetab="guideTabGroq" type="button">Groq AI & API Key</button>
+        </div>
+      </div>
+
+      <div class="guide-modal-body" id="guideModalBody">
+        <!-- Tab 1: How It Works -->
+        <div class="guide-tab-content" id="guideTabArchitecture">
+          <div class="guide-card">
+            <h3>Single-Binary Desktop Architecture</h3>
+            <p>AXEL is engineered in pure Rust as a standalone native application to replace conventional operating system file managers with intelligent, zero-overhead document understanding. Unlike Electron or Python-based tools, AXEL runs within a lean memory budget (~10 MB RSS) with instantaneous sub-millisecond startup.</p>
+          </div>
+          <div class="guide-card">
+            <h3>Zero Byte Duplication & Virtual Hierarchies</h3>
+            <p>Conventional file systems force documents into rigid, single-path directory structures. AXEL computes dynamic Virtual Paths. A single file can belong to multiple logical constellations simultaneously (for example, a machine learning lecture note can be indexed under Academics/Data Science, Career/Coursework, and Research/AI) without duplicating physical bytes on your storage device.</p>
+          </div>
+          <div class="guide-card">
+            <h3>Multi-Format Extraction & OCR</h3>
+            <p>AXEL extracts clean semantic text across formats directly: pure-Rust PDF parsing via pdf-extract, zero-dependency DOCX XML document streaming, code symbol deconstruction, and automatic Tesseract OCR discovery for scanned PDFs and images.</p>
+          </div>
+          <div class="guide-card">
+            <h3>Sub-Millisecond Hybrid Search & Galaxy Canvas</h3>
+            <p>Search queries execute in sub-millisecond time across thousands of indexed files using hybrid score blending. The interactive Galaxy Canvas visualizes topic clusters, keyword constellations, and semantic links in real time with hardware-accelerated 60 FPS rendering.</p>
+          </div>
+        </div>
+
+        <!-- Tab 2: Native Permissions -->
+        <div class="guide-tab-content hidden" id="guideTabPermissions">
+          <div class="guide-card">
+            <h3>Local Filesystem Access (Selected Workspaces Only)</h3>
+            <p>AXEL only accesses directories you explicitly configure or drag into the application window. It reads files to extract metadata, generates SHA-256 hashes for deduplication, and monitors folder changes via the native OS kernel notification subsystem (inotify on Linux, kqueue on macOS, ReadDirectoryChanges on Windows). AXEL never scans your entire root filesystem.</p>
+          </div>
+          <div class="guide-card">
+            <h3>Safe OS Trash Integration</h3>
+            <p>When trashing duplicate files or removing obsolete items, AXEL dispatches them to your operating system's native trash bin using the platform's trash-cli/XDG/Finder API. Your files remain recoverable until you manually empty your system trash. Permanent unrecoverable deletion is only executed if explicitly confirmed.</p>
+          </div>
+          <div class="guide-card">
+            <h3>Network Sockets & Port Binding</h3>
+            <p>AXEL binds an embedded HTTP server to 127.0.0.1 (default port 8765) to provide the local REST API and Web UI. It never exposes ports to external interfaces unless you explicitly configure the host to 0.0.0.0. The only outbound network requests AXEL makes are HTTPS calls to Groq's API endpoint (api.groq.com) when an API key is configured and Force Offline Mode is disabled.</p>
+          </div>
+          <div class="guide-card">
+            <h3>Zero Telemetry & Zero Data Collection</h3>
+            <p>AXEL does not include Google Analytics, Sentry, Mixpanel, or any third-party telemetry libraries. No diagnostic beacons, crash telemetry, or usage metrics are transmitted over the network.</p>
+          </div>
+        </div>
+
+        <!-- Tab 3: Privacy & Security -->
+        <div class="guide-tab-content hidden" id="guideTabPrivacy">
+          <div class="guide-card">
+            <h3>Automated PII & Credential Redaction Shield</h3>
+            <p>Before any document text or code excerpt is dispatched to Groq's LLM endpoint, AXEL's privacy shield automatically detects and redacts high-risk sensitive patterns: passwords, API keys, private tokens, Aadhaar numbers, PAN numbers, Social Security numbers, credit card sequences, and personal email addresses. Sensitive tokens are replaced with [REDACTED_SECRET] or [REDACTED_ID] markers.</p>
+          </div>
+          <div class="guide-card">
+            <h3>100% Air-Gapped / Force Offline Mode</h3>
+            <p>For classified documents, proprietary intellectual property, or confidential legal files, you can toggle "Force Offline Mode" in Settings at any time. When active, AXEL shuts down all outbound network communication and categorizes files using local deterministic rule engines, TF-IDF symbol extractors, and vector space cosine similarity against pre-computed domain centroids.</p>
+          </div>
+          <div class="guide-card">
+            <h3>Atomic Persistence & Crash Safety</h3>
+            <p>Document indices and settings are written to temporary files (.tmp) and atomically committed via filesystem renames. If your system encounters a sudden power loss or crash, AXEL's index is never left in a corrupted state, and automatic backup snapshots (.bak) are maintained continuously.</p>
+          </div>
+        </div>
+
+        <!-- Tab 4: Groq AI & API Key -->
+        <div class="guide-tab-content hidden" id="guideTabGroq">
+          <div class="guide-card">
+            <h3>Where to Get Your Groq API Key</h3>
+            <p>1. Visit the Groq Console at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">https://console.groq.com/keys</a>.<br>
+            2. Sign up or log in with your account.<br>
+            3. Click "Create API Key", give it a label (e.g. "Axel Desktop"), and copy the key string.<br>
+            4. Paste the key into AXEL Settings (AI & Cloud tab) and click "Test Key" to verify live latency.</p>
+          </div>
+          <div class="guide-card">
+            <h3>Why Groq? (LPU Hardware Acceleration & Context Windows)</h3>
+            <p>Groq runs on specialized Language Processing Unit (LPU) silicon rather than conventional GPUs. This architecture delivers 500+ tokens per second with typical round-trip request latencies under 180 milliseconds, turning document categorization from a sluggish background job into an instant, real-time interactive experience.<br><br>
+            Furthermore, Groq provides massive context windows (up to 128,000 tokens on models like Llama 3.3 70B), allowing AXEL to process comprehensive academic textbooks, long legal contracts, and dense multi-file source code repositories without aggressive chunking or context loss.</p>
+          </div>
+          <div class="guide-card">
+            <h3>Dynamic Model Discovery & Open-Weights Freedom</h3>
+            <p>AXEL queries the live Groq endpoint at runtime, automatically populating the available models for your account (such as Llama 3.3 70B, Llama 3.1 8B, Mixtral 8x7B, and Gemma 2 9B). You are never locked into a static list, and you can switch primary and fallback models dynamically as new architectures are released.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="guide-modal-footer">
+        <label class="guide-checkbox-label">
+          <input type="checkbox" id="chkDoNotShowGuideAgain" checked>
+          <span>Do not show this guide on startup</span>
+        </label>
+        <div style="display: flex; align-items: center; gap: 14px;">
+          <span style="font-size: 11px; color: var(--text-muted);">Re-open anytime from Settings</span>
+          <button class="btn-primary-copper" id="btnConfirmGuideModal" type="button" style="padding: 7px 18px; border-radius: 6px;">Get Started</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Toast Notification Stack -->
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>

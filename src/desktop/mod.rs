@@ -1,7 +1,9 @@
 pub mod chrome;
 pub mod galaxy;
+pub mod onboarding;
 pub mod overlays;
 pub mod panels;
+pub mod settings;
 pub mod theme;
 pub mod workstation;
 
@@ -48,6 +50,7 @@ enum WorkerCommand {
     TrashDuplicateFile { canonical_hash: String, trash_path: String },
     TrashAllDuplicates,
     TrashFile(String),
+    UpdateConfig(Config),
 }
 
 enum WorkerEvent {
@@ -112,6 +115,10 @@ pub struct AxelDesktopApp {
     snapshot_ready: bool,
     started_at: Instant,
     properties_target: Option<FileProperties>,
+    config: Config,
+    settings_state: crate::desktop::settings::DesktopSettingsState,
+    show_onboarding_guide: bool,
+    onboarding_state: crate::desktop::onboarding::OnboardingState,
 }
 
 impl AxelDesktopApp {
@@ -202,6 +209,10 @@ impl AxelDesktopApp {
             snapshot_ready: false,
             started_at: Instant::now(),
             properties_target: None,
+            show_onboarding_guide: !config.has_seen_onboarding,
+            onboarding_state: crate::desktop::onboarding::OnboardingState::default(),
+            settings_state: crate::desktop::settings::DesktopSettingsState::from_config(&config),
+            config,
         }
     }
 
@@ -535,21 +546,56 @@ impl AxelDesktopApp {
                 self.status_text = Some("Moving file to OS trash...".to_string());
                 let _ = self.cmd_tx.send(WorkerCommand::TrashFile(path));
             }
+            PanelAction::ToggleSettingsModal => {
+                self.settings_state.open = !self.settings_state.open;
+                if self.settings_state.open {
+                    self.settings_state.save_status = None;
+                    self.show_telemetry = false;
+                }
+            }
+            PanelAction::CloseSettingsModal => {
+                self.settings_state.open = false;
+            }
+            PanelAction::ToggleOnboardingGuide => {
+                self.show_onboarding_guide = !self.show_onboarding_guide;
+                if self.show_onboarding_guide {
+                    self.settings_state.open = false;
+                    self.show_telemetry = false;
+                }
+            }
+            PanelAction::CloseOnboardingGuide => {
+                self.show_onboarding_guide = false;
+            }
+            PanelAction::SaveSettings(new_cfg) => {
+                self.config = new_cfg.clone();
+                self.stats.active_model = new_cfg.model_name.clone();
+                self.stats.groq_enabled = new_cfg.groq_api_key.is_some() && !new_cfg.force_offline;
+                let _ = self.cmd_tx.send(WorkerCommand::UpdateConfig(new_cfg));
+            }
         }
     }
 
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         let search_focused = ctx.memory(|m| m.has_focus(Id::unique("axel_semantic_search_input")));
 
-        let (ctrl_k, slash, esc, ctrl_r, zero) = ctx.input(|i| {
+        let (ctrl_k, slash, esc, ctrl_r, zero, ctrl_comma) = ctx.input(|i| {
             (
                 (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::K),
                 !search_focused && i.key_pressed(Key::Slash),
                 i.key_pressed(Key::Escape),
                 (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::R),
                 !search_focused && i.key_pressed(Key::Num0),
+                (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::Comma),
             )
         });
+
+        if ctrl_comma {
+            self.settings_state.open = !self.settings_state.open;
+            if self.settings_state.open {
+                self.settings_state.save_status = None;
+                self.show_telemetry = false;
+            }
+        }
 
         if ctrl_k || slash {
             self.focus_search_requested = true;
@@ -566,7 +612,11 @@ impl AxelDesktopApp {
             self.camera.reset();
         }
         if esc {
-            if self.properties_target.is_some() {
+            if self.show_onboarding_guide {
+                self.show_onboarding_guide = false;
+            } else if self.settings_state.open {
+                self.settings_state.open = false;
+            } else if self.properties_target.is_some() {
                 self.properties_target = None;
             } else if self.search_popover_open {
                 self.search_popover_open = false;
@@ -873,6 +923,21 @@ impl eframe::App for AxelDesktopApp {
             merge_action(&mut pending_action, prop_act);
         }
 
+        let settings_act = crate::desktop::settings::render_settings_modal(
+            &ctx,
+            &mut self.settings_state,
+            &self.config,
+        );
+        merge_action(&mut pending_action, settings_act);
+
+        let onboarding_act = crate::desktop::onboarding::render_onboarding_modal(
+            &ctx,
+            &mut self.show_onboarding_guide,
+            &mut self.config,
+            &mut self.onboarding_state,
+        );
+        merge_action(&mut pending_action, onboarding_act);
+
         self.handle_panel_action(&ctx, pending_action);
         self.maybe_capture_screenshot(&ctx);
 
@@ -911,7 +976,7 @@ fn spawn_background_worker(
 
             let mut config = initial_config;
             let mut index = DocumentIndex::load(&config.index_file);
-            let ai = Arc::new(AiEngine::new(&config));
+            let mut ai = Arc::new(AiEngine::new(&config));
 
             let emit_snapshot = |cfg: &Config, idx: &DocumentIndex, status: Option<String>| {
                 let items = idx.all().to_vec();
@@ -1365,6 +1430,11 @@ fn spawn_background_worker(
                                         egui_ctx.request_repaint();
                                     }
                                 }
+                            }
+                            WorkerCommand::UpdateConfig(new_cfg) => {
+                                config = new_cfg;
+                                ai = Arc::new(AiEngine::new(&config));
+                                emit_snapshot(&config, &index, Some("Settings applied & active".to_string()));
                             }
                         }
                     }

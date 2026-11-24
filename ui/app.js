@@ -931,7 +931,9 @@
     }
   }
 
-  function openSettingsModal() {
+  let currentSettings = null;
+
+  async function openSettingsModal() {
     state.lastFocusedEl = document.activeElement;
     const s = state.stats || {};
     el.telemetryGrid.innerHTML = `
@@ -941,9 +943,198 @@
       <div class="telemetry-card"><div class="telemetry-label">OCR Engine</div><div class="telemetry-value">${s.tesseract_ready ? 'Tesseract Ready' : 'Filename Fallback'}</div></div>
       <div class="telemetry-card" style="grid-column:1/-1;"><div class="telemetry-label">Watched Folder</div><div class="telemetry-value">${escapeHtml(s.input_folder || './documents')}</div></div>
     `;
+
+    try {
+      const res = await apiFetch('/api/settings');
+      if (res.ok) {
+        currentSettings = await res.json();
+        populateSettingsFields(currentSettings);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch settings:', err);
+    }
+
     el.inspectorDrawer.classList.add('hidden');
     el.settingsDrawer.classList.remove('hidden');
-    document.getElementById('btnCloseSettingsModal').focus();
+    const closeBtn = document.getElementById('btnCloseSettingsModal');
+    if (closeBtn) closeBtn.focus();
+  }
+
+  function populateSettingsFields(cfg) {
+    if (!cfg) return;
+    const apiKeyInput = document.getElementById('cfgGroqApiKey');
+    if (apiKeyInput) {
+      if (cfg.groq_api_key_configured && !apiKeyInput.value) {
+        apiKeyInput.placeholder = cfg.groq_api_key_masked || '••••••••••••••••';
+      }
+    }
+
+    const modelSelect = document.getElementById('cfgModelSelect');
+    if (modelSelect) {
+      modelSelect.innerHTML = '';
+      const models = [
+        cfg.model_name,
+        ...(cfg.model_fallbacks || []),
+        'llama-3.3-70b-versatile',
+        'llama-3.1-8b-instant',
+        'mixtral-8x7b-32768',
+        'qwen/qwen3.8-27b',
+      ];
+      const uniqueModels = [...new Set(models.filter(Boolean))];
+      for (const m of uniqueModels) {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        if (m === cfg.model_name) opt.selected = true;
+        modelSelect.appendChild(opt);
+      }
+    }
+
+    const forceOffline = document.getElementById('cfgForceOffline');
+    if (forceOffline) forceOffline.checked = Boolean(cfg.force_offline);
+
+    const enableCloudCode = document.getElementById('cfgEnableCloudCode');
+    if (enableCloudCode) enableCloudCode.checked = Boolean(cfg.enable_cloud_code);
+
+    const enableOcr = document.getElementById('cfgEnableOcr');
+    if (enableOcr) enableOcr.checked = Boolean(cfg.enable_ocr);
+
+    const maxFileSize = document.getElementById('cfgMaxFileSize');
+    const maxFileSizeLabel = document.getElementById('maxFileSizeLabel');
+    if (maxFileSize) {
+      maxFileSize.value = cfg.max_file_size_mb || 100;
+      if (maxFileSizeLabel) maxFileSizeLabel.textContent = `${maxFileSize.value} MB`;
+    }
+
+    const excludedPatterns = document.getElementById('cfgExcludedPatterns');
+    if (excludedPatterns) {
+      excludedPatterns.value = (cfg.excluded_patterns || []).join(', ');
+    }
+
+    const themeSelect = document.getElementById('cfgThemeSelect');
+    if (themeSelect && cfg.theme) {
+      themeSelect.value = cfg.theme;
+    }
+
+    const lblInputFolder = document.getElementById('lblInputFolder');
+    if (lblInputFolder && cfg.input_folder) {
+      lblInputFolder.textContent = cfg.input_folder;
+    }
+
+    const lblIndexFile = document.getElementById('lblIndexFile');
+    if (lblIndexFile && cfg.index_file) {
+      lblIndexFile.textContent = cfg.index_file;
+    }
+  }
+
+  async function testGroqKeyAction() {
+    const keyInput = document.getElementById('cfgGroqApiKey');
+    const feedback = document.getElementById('keyTestFeedback');
+    const modelSelect = document.getElementById('cfgModelSelect');
+    if (!feedback) return;
+
+    const enteredKey = keyInput ? keyInput.value.trim() : '';
+    feedback.className = 'key-test-feedback loading';
+    feedback.textContent = 'Testing Groq API connection and querying live model catalog...';
+    feedback.classList.remove('hidden');
+
+    try {
+      const res = await apiFetch('/api/settings/test-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: enteredKey || null }),
+      });
+      const data = await res.json();
+      if (data.valid) {
+        feedback.className = 'key-test-feedback success';
+        feedback.textContent = `✓ ${data.message}`;
+
+        if (Array.isArray(data.available_models) && data.available_models.length > 0 && modelSelect) {
+          const currentVal = modelSelect.value;
+          modelSelect.innerHTML = '';
+          for (const m of data.available_models) {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            if (m === currentVal) opt.selected = true;
+            modelSelect.appendChild(opt);
+          }
+        }
+      } else {
+        feedback.className = 'key-test-feedback error';
+        feedback.textContent = `✕ ${data.message || 'Key verification failed'}`;
+      }
+    } catch (err) {
+      feedback.className = 'key-test-feedback error';
+      feedback.textContent = `✕ Connection error: ${err.message}`;
+    }
+  }
+
+  async function saveSettingsAction() {
+    const saveBtn = document.getElementById('btnSaveSettings');
+    const saveStatus = document.getElementById('settingsSaveStatus');
+    const keyInput = document.getElementById('cfgGroqApiKey');
+    const modelSelect = document.getElementById('cfgModelSelect');
+    const forceOffline = document.getElementById('cfgForceOffline');
+    const enableCloudCode = document.getElementById('cfgEnableCloudCode');
+    const enableOcr = document.getElementById('cfgEnableOcr');
+    const maxFileSize = document.getElementById('cfgMaxFileSize');
+    const excludedPatterns = document.getElementById('cfgExcludedPatterns');
+    const themeSelect = document.getElementById('cfgThemeSelect');
+
+    const payload = {};
+    if (keyInput && keyInput.value.trim()) {
+      payload.groq_api_key = keyInput.value.trim();
+    }
+    if (modelSelect && modelSelect.value) {
+      payload.model_name = modelSelect.value;
+    }
+    if (forceOffline) {
+      payload.force_offline = forceOffline.checked;
+    }
+    if (enableCloudCode) {
+      payload.enable_cloud_code = enableCloudCode.checked;
+    }
+    if (enableOcr) {
+      payload.enable_ocr = enableOcr.checked;
+    }
+    if (maxFileSize) {
+      payload.max_file_size_mb = parseInt(maxFileSize.value, 10);
+    }
+    if (excludedPatterns) {
+      payload.excluded_patterns = excludedPatterns.value
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+    }
+    if (themeSelect) {
+      payload.theme = themeSelect.value;
+    }
+
+    if (saveBtn) saveBtn.disabled = true;
+    if (saveStatus) saveStatus.textContent = 'Saving atomically to disk...';
+
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(errText || `Server returned ${res.status}`);
+      }
+      currentSettings = await res.json();
+      populateSettingsFields(currentSettings);
+      showToast('Settings saved and persisted atomically to disk');
+      if (saveStatus) saveStatus.textContent = 'Saved successfully';
+      await fetchGraphAndStats();
+    } catch (err) {
+      showToast(`Failed to save settings: ${err.message}`);
+      if (saveStatus) saveStatus.textContent = `Error: ${err.message}`;
+    } finally {
+      if (saveBtn) saveBtn.disabled = false;
+    }
   }
 
   function closeModals() {
@@ -955,6 +1146,44 @@
       state.lastFocusedEl.focus();
       state.lastFocusedEl = null;
     }
+  }
+
+  function openGuideModal() {
+    const modal = document.getElementById('guideModalOverlay');
+    if (modal) modal.classList.remove('hidden');
+  }
+
+  async function closeGuideModal() {
+    const modal = document.getElementById('guideModalOverlay');
+    if (modal) modal.classList.add('hidden');
+    const chk = document.getElementById('chkDoNotShowGuideAgain');
+    if (chk && chk.checked) {
+      try {
+        await apiFetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ has_seen_onboarding: true }),
+        });
+        if (currentSettings) {
+          currentSettings.has_seen_onboarding = true;
+        }
+      } catch (err) {
+        console.warn('Failed to persist onboarding guide state:', err);
+      }
+    }
+  }
+
+  async function checkInitialOnboarding() {
+    try {
+      const res = await apiFetch('/api/settings');
+      if (res.ok) {
+        const cfg = await res.json();
+        currentSettings = cfg;
+        if (!cfg.has_seen_onboarding) {
+          openGuideModal();
+        }
+      }
+    } catch (_) {}
   }
 
   async function triggerScan() {
@@ -1012,6 +1241,8 @@
         if (payload.type === 'index_updated') {
           fetchGraphAndStats();
           if (payload.file) showToast(`Live Watcher indexed: ${payload.file}`);
+        } else if (payload.type === 'settings_updated') {
+          fetchGraphAndStats();
         }
       } catch (_) {}
     };
@@ -1261,13 +1492,99 @@
       }
     });
 
+    // Settings Tabs & Controls
+    document.querySelectorAll('.settings-tabs[role="tablist"] .settings-tab').forEach(tabBtn => {
+      tabBtn.addEventListener('click', () => {
+        document.querySelectorAll('.settings-tabs[role="tablist"] .settings-tab').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.settings-tab-content').forEach(c => c.classList.add('hidden'));
+        tabBtn.classList.add('active');
+        const targetId = tabBtn.dataset.tab;
+        const targetContent = document.getElementById(targetId);
+        if (targetContent) targetContent.classList.remove('hidden');
+      });
+    });
+
+    // Architecture & Onboarding Guide Tabs & Controls
+    document.querySelectorAll('.guide-tab').forEach(tabBtn => {
+      tabBtn.addEventListener('click', () => {
+        document.querySelectorAll('.guide-tab').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.guide-tab-content').forEach(c => c.classList.add('hidden'));
+        tabBtn.classList.add('active');
+        const targetId = tabBtn.dataset.guidetab;
+        const targetContent = document.getElementById(targetId);
+        if (targetContent) targetContent.classList.remove('hidden');
+      });
+    });
+
+    const btnOpenGuideFromSettings = document.getElementById('btnOpenGuideFromSettings');
+    if (btnOpenGuideFromSettings) {
+      btnOpenGuideFromSettings.addEventListener('click', () => {
+        openGuideModal();
+      });
+    }
+
+    const btnCloseGuideModal = document.getElementById('btnCloseGuideModal');
+    if (btnCloseGuideModal) {
+      btnCloseGuideModal.addEventListener('click', closeGuideModal);
+    }
+
+    const btnConfirmGuideModal = document.getElementById('btnConfirmGuideModal');
+    if (btnConfirmGuideModal) {
+      btnConfirmGuideModal.addEventListener('click', closeGuideModal);
+    }
+
+    const guideOverlay = document.getElementById('guideModalOverlay');
+    if (guideOverlay) {
+      guideOverlay.addEventListener('click', (e) => {
+        if (e.target === guideOverlay) {
+          closeGuideModal();
+        }
+      });
+    }
+
+    const btnToggleKeyVis = document.getElementById('btnToggleKeyVis');
+    if (btnToggleKeyVis) {
+      btnToggleKeyVis.addEventListener('click', () => {
+        const input = document.getElementById('cfgGroqApiKey');
+        if (input) {
+          input.type = input.type === 'password' ? 'text' : 'password';
+        }
+      });
+    }
+
+    const cfgMaxFileSize = document.getElementById('cfgMaxFileSize');
+    if (cfgMaxFileSize) {
+      cfgMaxFileSize.addEventListener('input', (e) => {
+        const lbl = document.getElementById('maxFileSizeLabel');
+        if (lbl) lbl.textContent = `${e.target.value} MB`;
+      });
+    }
+
+    const btnTestGroqKey = document.getElementById('btnTestGroqKey');
+    if (btnTestGroqKey) {
+      btnTestGroqKey.addEventListener('click', testGroqKeyAction);
+    }
+
+    const btnSaveSettings = document.getElementById('btnSaveSettings');
+    if (btnSaveSettings) {
+      btnSaveSettings.addEventListener('click', saveSettingsAction);
+    }
+
+    const btnCloseSettingsModal = document.getElementById('btnCloseSettingsModal');
+    if (btnCloseSettingsModal) {
+      btnCloseSettingsModal.addEventListener('click', closeModals);
+    }
+
     // Keyboard shortcuts
     window.addEventListener('keydown', (e) => {
       if (e.key === '/' && document.activeElement !== el.searchInput && el.inspectorDrawer.classList.contains('hidden')) {
         e.preventDefault();
         el.searchInput.focus();
       } else if (e.key === 'Escape') {
-        if (!el.inspectorDrawer.classList.contains('hidden') || !el.settingsDrawer.classList.contains('hidden')) {
+        const guideOverlay = document.getElementById('guideModalOverlay');
+        if (guideOverlay && !guideOverlay.classList.contains('hidden')) {
+          closeGuideModal();
+        } else if (!el.inspectorDrawer.classList.contains('hidden') || !el.settingsDrawer.classList.contains('hidden')) {
           closeModals();
         } else if (el.searchInput.value) {
           el.searchInput.value = '';
@@ -1282,6 +1599,7 @@
   resizeCanvas();
   bindEvents();
   fetchGraphAndStats();
+  checkInitialOnboarding();
   connectSse();
   requestAnimationFrame(renderFrame);
 })();

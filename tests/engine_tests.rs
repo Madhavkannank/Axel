@@ -1607,6 +1607,9 @@ fn test_ui_index_html_supported_upload_types() {
     assert!(html.contains(".mjs"), "ui/index.html must accept modern script formats");
     assert!(html.contains(".lua"), "ui/index.html must accept lua");
     assert!(html.contains(".odt"), "ui/index.html must accept odt");
+
+    let css = include_str!("../ui/styles.css");
+    assert!(css.contains(".guide-modal"), "ui/styles.css must include guide modal styling");
 }
 
 #[tokio::test]

@@ -44,6 +44,11 @@ pub enum PanelAction {
     SetTheme(ThemePreset),
     ResetCamera,
     ToggleTelemetryDrawer,
+    ToggleSettingsModal,
+    CloseSettingsModal,
+    ToggleOnboardingGuide,
+    CloseOnboardingGuide,
+    SaveSettings(crate::config::Config),
     SelectNode(String),
     SelectHub(String),
     SetCategoryFilter(Option<String>),
@@ -306,11 +311,11 @@ pub fn render_topbar(
 
                     if top_icon_btn(
                         ui,
-                        "System Telemetry & Settings",
+                        "Settings (AI, OCR, Storage)",
                         show_telemetry,
                         |painter, c, col| draw_icon_gear(painter, c, 16.0, col),
                     ) {
-                        action = PanelAction::ToggleTelemetryDrawer;
+                        action = PanelAction::ToggleSettingsModal;
                     }
 
                     let theme_tip = format!("Theme: {} (click to switch)", active_theme().label());
@@ -525,6 +530,16 @@ pub fn render_left_rail(
                     |painter, c, col| draw_icon_activity(painter, c, 16.0, col),
                 ) {
                     action = PanelAction::ToggleActivitySidebar;
+                }
+
+                if rail_btn(
+                    ui,
+                    "Settings (AI, OCR, Storage)",
+                    false,
+                    false,
+                    |painter, c, col| draw_icon_gear(painter, c, 16.0, col),
+                ) {
+                    action = PanelAction::ToggleSettingsModal;
                 }
             });
         });

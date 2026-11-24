@@ -35,9 +35,9 @@ const UI_JS: &str = include_str!("../../ui/app.js");
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Config,
+    pub config: Arc<std::sync::RwLock<Config>>,
     pub index: Arc<Mutex<DocumentIndex>>,
-    pub ai: Arc<AiEngine>,
+    pub ai: Arc<std::sync::RwLock<Arc<AiEngine>>>,
     pub events_tx: broadcast::Sender<String>,
     pub api_token: Option<String>,
     pub session_token: String,
@@ -56,15 +56,23 @@ impl AppState {
         is_remote: bool,
     ) -> Self {
         Self {
-            config,
+            config: Arc::new(std::sync::RwLock::new(config)),
             index,
-            ai,
+            ai: Arc::new(std::sync::RwLock::new(ai)),
             events_tx,
             api_token,
             session_token,
             is_remote,
             remote_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    pub fn get_config(&self) -> Config {
+        self.config.read().unwrap().clone()
+    }
+
+    pub fn get_ai(&self) -> Arc<AiEngine> {
+        self.ai.read().unwrap().clone()
     }
 }
 
@@ -156,7 +164,7 @@ async fn auth_middleware(
 }
 
 pub fn create_router(state: AppState) -> Router {
-    let allowed_origins_list = state.config.allowed_origins.clone();
+    let allowed_origins_list = state.get_config().allowed_origins.clone();
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::predicate(
             move |origin: &HeaderValue, _parts: &axum::http::request::Parts| {
@@ -210,6 +218,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/scan", post(trigger_scan))
         .route("/api/upload", post(upload_document))
         .route("/api/events", get(sse_events))
+        .route("/api/settings", get(get_settings).post(update_settings))
+        .route("/api/settings/test-key", post(test_api_key_endpoint))
         .layer(DefaultBodyLimit::max(110 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(cors)
@@ -291,7 +301,7 @@ pub async fn run_server(config: Config, open_browser: bool) -> Result<(), Box<dy
 }
 
 fn spawn_background_watcher(state: AppState) {
-    let watch_dir = state.config.input_folder.clone();
+    let watch_dir = state.get_config().input_folder.clone();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::watcher::WatchEvent>();
 
     std::thread::spawn(move || {
@@ -358,7 +368,8 @@ fn spawn_background_watcher(state: AppState) {
                         continue;
                     }
 
-                    if let Some(item) = analyze_and_build_item(&path, &state.ai).await {
+                    let ai = state.get_ai();
+                    if let Some(item) = analyze_and_build_item(&path, &ai).await {
                         let file_name = item.file.clone();
                         let save_ok = {
                             let mut index = state.index.lock().await;
@@ -569,7 +580,7 @@ async fn get_document_detail(
             .ok_or_else(|| (StatusCode::NOT_FOUND, "Document not found".to_string()))?
     };
 
-    let workspace = state.config.input_folder.clone();
+    let workspace = state.get_config().input_folder.clone();
     // Run verification & text extraction off the main Tokio executor to prevent thread blocking (H02, H11)
     let detail = tokio::task::spawn_blocking(move || {
         crate::engine::build_document_detail_verified(&item, &workspace)
@@ -591,13 +602,14 @@ async fn delete_document(
     AxumPath(hash): AxumPath<String>,
     Query(params): Query<DeleteParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let cfg = state.get_config();
     let outcome = {
         let mut index = state.index.lock().await;
         delete_document_from_index(
             &hash,
             params.delete_file.unwrap_or(false),
             params.permanent.unwrap_or(false),
-            &state.config,
+            &cfg,
             &mut index,
         )
         .map_err(|e| {
@@ -729,7 +741,7 @@ async fn get_document_raw(
     // A11: Check size, validate hash, and stream from a SINGLE open file handle without reopening
     const MAX_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
     let (std_file, valid_path, file_len) =
-        open_and_verify_document_handle(&item, &state.config.input_folder, MAX_DOWNLOAD_BYTES)?;
+        open_and_verify_document_handle(&item, &state.get_config().input_folder, MAX_DOWNLOAD_BYTES)?;
 
     let tokio_file = tokio::fs::File::from_std(std_file);
     let stream = tokio_util::io::ReaderStream::new(tokio_file);
@@ -782,7 +794,7 @@ async fn search_documents(
     Query(params): Query<SearchParams>,
 ) -> Json<SearchApiResponse> {
     let q = params.q.unwrap_or_default();
-    let limit = params.limit.unwrap_or(state.config.top_k_results);
+    let limit = params.limit.unwrap_or(state.get_config().top_k_results);
 
     let index = state.index.lock().await;
     let all_matches = index.search(&q, usize::MAX);
@@ -797,8 +809,9 @@ async fn search_documents(
 }
 
 async fn get_stats(State(state): State<AppState>) -> Json<SystemStats> {
+    let cfg = state.get_config();
     let index = state.index.lock().await;
-    Json(build_system_stats(&state.config, &index))
+    Json(build_system_stats(&cfg, &index))
 }
 
 async fn trigger_scan(State(state): State<AppState>) -> Result<Json<ScanSummary>, (StatusCode, String)> {
@@ -807,8 +820,10 @@ async fn trigger_scan(State(state): State<AppState>) -> Result<Json<ScanSummary>
         index.all().iter().map(|i| i.hash.clone()).collect()
     };
 
+    let cfg = state.get_config();
+    let ai = state.get_ai();
     let (summary, items_to_insert) =
-        scan_folder_into_items(&state.config.input_folder, &existing_hashes, &state.ai, false)
+        scan_folder_into_items(&cfg.input_folder, &existing_hashes, &ai, false)
             .await;
 
     if !items_to_insert.is_empty() {
@@ -840,8 +855,11 @@ async fn upload_document(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
-    if !state.config.input_folder.exists() {
-        let _ = std::fs::create_dir_all(&state.config.input_folder);
+    let cfg = state.get_config();
+    let ai = state.get_ai();
+
+    if !cfg.input_folder.exists() {
+        let _ = std::fs::create_dir_all(&cfg.input_folder);
     }
 
     let mut uploaded = Vec::new();
@@ -908,7 +926,7 @@ async fn upload_document(
         let upload_hash = format!("{:x}", upload_hasher.finalize());
 
         // A08: Stage file in hidden temporary staging file, flush & sync, then publish atomically
-        let (mut staging_file, staging_path) = match crate::engine::create_workspace_staging_file(&state.config.input_folder) {
+        let (mut staging_file, staging_path) = match crate::engine::create_workspace_staging_file(&cfg.input_folder) {
             Ok(res) => res,
             Err(e) => {
                 for p in &created_files_on_disk {
@@ -936,10 +954,10 @@ async fn upload_document(
 
         let published = match crate::engine::publish_staged_workspace_file(
             &staging_path,
-            &state.config.input_folder,
+            &cfg.input_folder,
             &safe_name,
             Some(&upload_hash),
-            &state.config.input_folder,
+            &cfg.input_folder,
         ) {
             Ok(res) => res,
             Err(e) => {
@@ -962,11 +980,11 @@ async fn upload_document(
         }
 
         // M15 & H15: Run unified analysis (handling both code files and document files)
-        let item = if let Some(analyzed) = analyze_and_build_item(&final_target_path, &state.ai).await {
+        let item = if let Some(analyzed) = analyze_and_build_item(&final_target_path, &ai).await {
             analyzed
         } else {
             let (text, _) = extract_text(&final_target_path);
-            let ai_res = state.ai.analyze_document(&text, &final_file_name, None).await;
+            let ai_res = ai.analyze_document(&text, &final_file_name, None).await;
             IndexItem::new(
                 final_file_name,
                 ai_res.category,
@@ -1036,4 +1054,203 @@ async fn upload_document(
         count: uploaded.len(),
         uploaded,
     }))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsResponse {
+    pub groq_api_key_configured: bool,
+    pub groq_api_key_masked: Option<String>,
+    pub model_name: String,
+    pub model_fallbacks: Vec<String>,
+    pub input_folder: String,
+    pub index_file: String,
+    pub max_keywords: usize,
+    pub top_k_results: usize,
+    pub port: u16,
+    pub host: String,
+    pub force_offline: bool,
+    pub enable_cloud_code: bool,
+    pub enable_ocr: bool,
+    pub max_file_size_mb: usize,
+    pub excluded_patterns: Vec<String>,
+    pub theme: String,
+    pub has_seen_onboarding: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSettingsRequest {
+    pub groq_api_key: Option<String>,
+    pub model_name: Option<String>,
+    pub model_fallbacks: Option<Vec<String>>,
+    pub force_offline: Option<bool>,
+    pub enable_cloud_code: Option<bool>,
+    pub enable_ocr: Option<bool>,
+    pub max_file_size_mb: Option<usize>,
+    pub excluded_patterns: Option<Vec<String>>,
+    pub theme: Option<String>,
+    pub has_seen_onboarding: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestKeyRequest {
+    pub api_key: Option<String>,
+}
+
+async fn get_settings(State(state): State<AppState>) -> Json<SettingsResponse> {
+    let cfg = state.get_config();
+    let groq_api_key_configured = cfg.groq_api_key.as_ref().map_or(false, |k| !k.is_empty());
+    let groq_api_key_masked = cfg.groq_api_key.as_ref().map(|k| mask_token(k));
+
+    Json(SettingsResponse {
+        groq_api_key_configured,
+        groq_api_key_masked,
+        model_name: cfg.model_name,
+        model_fallbacks: cfg.model_fallbacks,
+        input_folder: cfg.input_folder.display().to_string(),
+        index_file: cfg.index_file.display().to_string(),
+        max_keywords: cfg.max_keywords,
+        top_k_results: cfg.top_k_results,
+        port: cfg.port,
+        host: cfg.host,
+        force_offline: cfg.force_offline,
+        enable_cloud_code: cfg.enable_cloud_code,
+        enable_ocr: cfg.enable_ocr,
+        max_file_size_mb: cfg.max_file_size_mb,
+        excluded_patterns: cfg.excluded_patterns,
+        theme: cfg.theme,
+        has_seen_onboarding: cfg.has_seen_onboarding,
+    })
+}
+
+async fn update_settings(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateSettingsRequest>,
+) -> Result<Json<SettingsResponse>, (StatusCode, String)> {
+    let mut ai_needs_reload = false;
+    let updated_config = {
+        let mut cfg = state.config.write().map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Config lock poisoned: {e}"))
+        })?;
+
+        if let Some(key) = payload.groq_api_key {
+            let trimmed = key.trim().to_string();
+            if trimmed.is_empty() {
+                cfg.groq_api_key = None;
+            } else {
+                cfg.groq_api_key = Some(trimmed);
+            }
+            ai_needs_reload = true;
+        }
+
+        if let Some(model) = payload.model_name {
+            if !model.trim().is_empty() {
+                cfg.model_name = model.trim().to_string();
+                ai_needs_reload = true;
+            }
+        }
+
+        if let Some(fallbacks) = payload.model_fallbacks {
+            cfg.model_fallbacks = fallbacks;
+            ai_needs_reload = true;
+        }
+
+        if let Some(offline) = payload.force_offline {
+            cfg.force_offline = offline;
+        }
+
+        if let Some(cloud_code) = payload.enable_cloud_code {
+            cfg.enable_cloud_code = cloud_code;
+        }
+
+        if let Some(ocr) = payload.enable_ocr {
+            cfg.enable_ocr = ocr;
+        }
+
+        if let Some(max_size) = payload.max_file_size_mb {
+            cfg.max_file_size_mb = max_size;
+        }
+
+        if let Some(patterns) = payload.excluded_patterns {
+            cfg.excluded_patterns = patterns;
+        }
+
+        if let Some(theme) = payload.theme {
+            cfg.theme = theme;
+        }
+
+        if let Some(seen) = payload.has_seen_onboarding {
+            cfg.has_seen_onboarding = seen;
+        }
+
+        if let Err(e) = cfg.save() {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to persist settings: {e}"),
+            ));
+        }
+
+        cfg.clone()
+    };
+
+    if ai_needs_reload {
+        let new_ai = Arc::new(AiEngine::new(&updated_config));
+        if let Ok(mut ai_lock) = state.ai.write() {
+            *ai_lock = new_ai;
+        }
+    }
+
+    emit_index_event(&state.events_tx, "settings_updated", None);
+
+    let groq_api_key_configured = updated_config.groq_api_key.as_ref().map_or(false, |k| !k.is_empty());
+    let groq_api_key_masked = updated_config.groq_api_key.as_ref().map(|k| mask_token(k));
+
+    Ok(Json(SettingsResponse {
+        groq_api_key_configured,
+        groq_api_key_masked,
+        model_name: updated_config.model_name,
+        model_fallbacks: updated_config.model_fallbacks,
+        input_folder: updated_config.input_folder.display().to_string(),
+        index_file: updated_config.index_file.display().to_string(),
+        max_keywords: updated_config.max_keywords,
+        top_k_results: updated_config.top_k_results,
+        port: updated_config.port,
+        host: updated_config.host,
+        force_offline: updated_config.force_offline,
+        enable_cloud_code: updated_config.enable_cloud_code,
+        enable_ocr: updated_config.enable_ocr,
+        max_file_size_mb: updated_config.max_file_size_mb,
+        excluded_patterns: updated_config.excluded_patterns,
+        theme: updated_config.theme,
+        has_seen_onboarding: updated_config.has_seen_onboarding,
+    }))
+}
+
+async fn test_api_key_endpoint(
+    State(state): State<AppState>,
+    Json(payload): Json<TestKeyRequest>,
+) -> Result<Json<crate::ai::GroqKeyVerification>, (StatusCode, String)> {
+    let key = if let Some(ref k) = payload.api_key {
+        let trimmed = k.trim();
+        if !trimmed.is_empty() {
+            trimmed.to_string()
+        } else {
+            state.get_config().groq_api_key.unwrap_or_default()
+        }
+    } else {
+        state.get_config().groq_api_key.unwrap_or_default()
+    };
+
+    if key.is_empty() {
+        return Ok(Json(crate::ai::GroqKeyVerification {
+            valid: false,
+            latency_ms: 0,
+            available_models: Vec::new(),
+            message: "No API key provided or configured".to_string(),
+        }));
+    }
+
+    let verification = crate::ai::test_groq_api_key(&key).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(verification))
 }
