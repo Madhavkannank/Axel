@@ -10,7 +10,7 @@ struct DomainCentroid {
 static DOMAIN_CENTROIDS: &[DomainCentroid] = &[
     DomainCentroid {
         name: "Academics",
-        default_subtopic: "Study Materials",
+        default_subtopic: "Coursework",
         term_weights: &[
             ("syllabus", 3.5),
             ("curriculum", 3.0),
@@ -40,6 +40,8 @@ static DOMAIN_CENTROIDS: &[DomainCentroid] = &[
             ("student", 1.5),
             ("grade", 1.8),
             ("credits", 2.0),
+            ("thesis", 2.5),
+            ("dissertation", 2.5),
         ],
     },
     DomainCentroid {
@@ -75,13 +77,9 @@ static DOMAIN_CENTROIDS: &[DomainCentroid] = &[
     },
     DomainCentroid {
         name: "Engineering",
-        default_subtopic: "Technical",
+        default_subtopic: "Software",
         term_weights: &[
             ("code", 2.5),
-            ("vortex", 2.5),
-            ("problem", 2.2),
-            ("statements", 2.2),
-            ("hackathon", 3.0),
             ("algorithm", 2.8),
             ("architecture", 2.5),
             ("implementation", 2.2),
@@ -99,9 +97,14 @@ static DOMAIN_CENTROIDS: &[DomainCentroid] = &[
             ("pytorch", 2.5),
             ("opencv", 2.8),
             ("vision", 2.2),
-            ("sobel", 3.0),
             ("filter", 2.0),
             ("gradient", 2.0),
+            ("protocol", 2.2),
+            ("hardware", 2.2),
+            ("firmware", 2.2),
+            ("debugging", 2.0),
+            ("testing", 2.0),
+            ("hackathon", 2.5),
         ],
     },
     DomainCentroid {
@@ -127,19 +130,19 @@ static DOMAIN_CENTROIDS: &[DomainCentroid] = &[
             ("expense", 2.2),
             ("statement", 2.0),
             ("consulting", 2.0),
+            ("payroll", 2.5),
         ],
     },
     DomainCentroid {
         name: "Creative",
-        default_subtopic: "Screenplay",
+        default_subtopic: "Writing",
         term_weights: &[
             ("screenplay", 4.0),
             ("script", 3.5),
             ("scene", 3.0),
             ("dialogue", 3.0),
-            ("horror", 2.8),
+            ("horror", 2.5),
             ("story", 3.0),
-            ("kadha", 3.5),
             ("character", 2.5),
             ("narrative", 2.5),
             ("novel", 2.5),
@@ -149,6 +152,10 @@ static DOMAIN_CENTROIDS: &[DomainCentroid] = &[
             ("author", 2.0),
             ("film", 2.2),
             ("cinema", 2.2),
+            ("fiction", 2.5),
+            ("literature", 2.5),
+            ("poetry", 2.5),
+            ("storyline", 2.5),
         ],
     },
     DomainCentroid {
@@ -198,18 +205,20 @@ static DOMAIN_CENTROIDS: &[DomainCentroid] = &[
         term_weights: &[
             ("wallpaper", 3.0),
             ("comic", 3.0),
+            ("comics", 3.0),
             ("collage", 3.0),
             ("poster", 2.5),
             ("artwork", 2.8),
             ("illustration", 2.8),
             ("cover", 2.0),
-            ("thor", 2.5),
             ("animation", 3.0),
             ("video", 3.0),
             ("episode", 3.0),
             ("audio", 2.5),
             ("soundtrack", 2.5),
             ("recording", 2.2),
+            ("photography", 2.5),
+            ("render", 2.2),
         ],
     },
 ];
@@ -217,13 +226,18 @@ static DOMAIN_CENTROIDS: &[DomainCentroid] = &[
 pub const DOC_DESCRIPTOR_WORDS: &[&str] = &[
     "syllabus", "curriculum", "notes", "lecture", "lectures", "exam", "examination",
     "exams", "qps", "qpaper", "question", "questions", "paper", "papers", "assignment",
-    "assignments", "midsem", "endsem", "semester", "sem", "unit", "units", "chapter",
-    "chapters", "module", "modules", "lab", "manual", "handout", "guide", "textbook",
-    "book", "slides", "part", "vol", "volume", "revision", "study", "material", "materials",
-    "course", "class", "reference", "dept", "department", "university", "college",
-    "test", "tests", "solution", "solutions", "internal", "assessment", "report",
-    "2018", "2019", "2020", "2021", "2022", "2023", "2024", "2025", "2026",
-    "msc", "bsc", "btech", "mtech", "phd", "be", "me", "ug", "pg",
+    "assignments", "homework", "midsem", "endsem", "semester", "sem", "unit", "units",
+    "chapter", "chapters", "module", "modules", "lab", "manual", "handout", "guide",
+    "textbook", "book", "slides", "part", "vol", "volume", "revision", "study",
+    "material", "materials", "course", "class", "reference", "dept", "department",
+    "university", "college", "test", "tests", "solution", "solutions", "internal",
+    "internals", "assessment", "report", "msc", "bsc", "btech", "mtech", "bca", "mca",
+    "phd", "be", "me", "ug", "pg", "final", "mid", "term",
+];
+
+const GENERIC_DISCARD_WORDS: &[&str] = &[
+    "document", "records", "archive", "content", "untitled", "file", "temp", "sample",
+    "image", "video", "audio", "screenshot", "download",
 ];
 
 pub struct DynamicSemanticClassifier;
@@ -244,18 +258,18 @@ impl DynamicSemanticClassifier {
         let is_image = crate::classifier::filter::is_image_extension(&clean_ext);
         let is_audio = matches!(clean_ext.as_str(), "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" | "wma");
         let is_code = crate::classifier::filter::is_script_extension(&clean_ext);
+        let is_doc = crate::classifier::filter::is_doc_extension(&clean_ext);
 
         // 1. Tokenize document text and filename into normalized term frequency map
         let mut term_freq: HashMap<String, f32> = HashMap::new();
 
-        // High weight for tokens in filename
+        // High weight for tokens in filename (title metadata has high semantic salience)
         let file_tokens: Vec<String> = file_name
             .split(|c: char| !c.is_alphanumeric())
             .map(|s| s.trim().to_lowercase())
             .filter(|s| s.len() >= 2)
             .collect();
 
-        // High weight for tokens in filename (title metadata has high semantic salience)
         for tok in &file_tokens {
             *term_freq.entry(tok.clone()).or_insert(0.0) += 6.0;
         }
@@ -315,7 +329,7 @@ impl DynamicSemanticClassifier {
             }
         }
 
-        // 3. Dynamic Series & Media Classification for Videos (Zero hardcoded names)
+        // 3. Dynamic Series & Media Classification for Episodic Videos
         if is_video {
             if let Some(stem) = std::path::Path::new(file_name).file_stem().and_then(|s| s.to_str()) {
                 let (series_title, _season_ep, _episode_title) = crate::extractor::video::parse_media_filename_metadata(stem);
@@ -334,10 +348,13 @@ impl DynamicSemanticClassifier {
         }
 
         // 4. Dynamic Subject Classification for Course Materials, Notes, Lectures, Syllabus, Exams
-        let is_study_material = {
-            let lower_name = file_name.to_lowercase();
-            DOC_DESCRIPTOR_WORDS.iter().any(|&desc| lower_name.contains(desc))
-                || best_domain.map_or(false, |d| d.name == "Academics")
+        // Restricted to document types to prevent images/audio with year numbers from being treated as academic courseware
+        let is_study_material = is_doc && {
+            file_tokens.iter().any(|tok| {
+                let trimmed = tok.trim_end_matches(|c: char| c.is_ascii_digit());
+                DOC_DESCRIPTOR_WORDS.contains(&tok.as_str())
+                    || (!trimmed.is_empty() && DOC_DESCRIPTOR_WORDS.contains(&trimmed))
+            }) || best_domain.map_or(false, |d| d.name == "Academics")
         };
 
         if is_study_material {
@@ -356,61 +373,45 @@ impl DynamicSemanticClassifier {
 
         let (category, dynamic_subtopic) = if let Some(domain) = best_domain {
             if best_score >= threshold {
-                if domain.name == "Academics" {
-                    if let Some(subject) = extract_salient_subject(&term_freq, extracted_keywords, file_name) {
-                        (subject.clone(), subject)
-                    } else {
-                        let subtopic = if let Some(matches) = domain_matching_terms.get(domain.name) {
-                            if let Some((top_term, _)) = matches.first() {
-                                synthesize_subtopic(domain.name, top_term, &clean_ext)
-                            } else {
-                                domain.default_subtopic.to_string()
-                            }
-                        } else {
-                            domain.default_subtopic.to_string()
-                        };
-                        (format!("{}/{}", domain.name, subtopic), subtopic)
-                    }
-                } else {
-                    let subtopic = if let Some(matches) = domain_matching_terms.get(domain.name) {
-                        if let Some((top_term, _)) = matches.first() {
-                            synthesize_subtopic(domain.name, top_term, &clean_ext)
-                        } else {
-                            domain.default_subtopic.to_string()
-                        }
-                    } else {
-                        domain.default_subtopic.to_string()
-                    };
-                    (format!("{}/{}", domain.name, subtopic), subtopic)
-                }
+                let top_matching_term = domain_matching_terms
+                    .get(domain.name)
+                    .and_then(|matches| matches.first().map(|(term, _)| term.as_str()))
+                    .unwrap_or("");
+
+                let subtopic = synthesize_subtopic(top_matching_term, domain.default_subtopic);
+                (format!("{}/{}", domain.name, subtopic), subtopic)
             } else if is_video {
-                let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name);
-                (format!("Media/{}", dyn_topic), dyn_topic)
+                let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Video");
+                (format!("Media/{dyn_topic}"), dyn_topic)
             } else if is_image {
-                ("Media/Visuals".to_string(), "Visuals".to_string())
+                let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Visuals");
+                (format!("Media/{dyn_topic}"), dyn_topic)
             } else if is_audio {
-                ("Media/Audio".to_string(), "Audio".to_string())
+                let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Audio");
+                (format!("Media/{dyn_topic}"), dyn_topic)
             } else if is_code {
                 (format!("Code/{}", clean_ext.to_uppercase()), clean_ext.to_uppercase())
             } else {
-                let dynamic_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name);
-                (format!("Documents/{}", dynamic_topic), dynamic_topic)
+                let dynamic_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Reference");
+                (format!("Documents/{dynamic_topic}"), dynamic_topic)
             }
         } else if is_video {
-            let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name);
-            (format!("Media/{}", dyn_topic), dyn_topic)
+            let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Video");
+            (format!("Media/{dyn_topic}"), dyn_topic)
         } else if is_image {
-            ("Media/Visuals".to_string(), "Visuals".to_string())
+            let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Visuals");
+            (format!("Media/{dyn_topic}"), dyn_topic)
         } else if is_audio {
-            ("Media/Audio".to_string(), "Audio".to_string())
+            let dyn_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Audio");
+            (format!("Media/{dyn_topic}"), dyn_topic)
         } else if is_code {
             (format!("Code/{}", clean_ext.to_uppercase()), clean_ext.to_uppercase())
         } else {
-            let dynamic_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name);
-            (format!("Documents/{}", dynamic_topic), dynamic_topic)
+            let dynamic_topic = extract_salient_topic(&term_freq, extracted_keywords, file_name, "Reference");
+            (format!("Documents/{dynamic_topic}"), dynamic_topic)
         };
 
-        // 5. Synthesize multi-pointer virtual hierarchy paths dynamically
+        // 6. Synthesize multi-pointer virtual hierarchy paths dynamically
         let virtual_paths = vec![
             format!("{category}/{file_name}"),
             if is_image || is_video || is_audio {
@@ -424,57 +425,28 @@ impl DynamicSemanticClassifier {
     }
 }
 
-/// Dynamically synthesizes a refined subtopic name from dominant term and file context
-fn synthesize_subtopic(domain: &str, top_term: &str, ext: &str) -> String {
-    match domain {
-        "Academics" => {
-            if top_term == "syllabus" || top_term == "curriculum" {
-                "Syllabus".to_string()
-            } else if top_term == "qps" || top_term == "qpaper" || top_term == "exam" || top_term == "question" {
-                "Past Papers".to_string()
-            } else if top_term == "lecture" || top_term == "notes" {
-                "Lectures".to_string()
-            } else {
-                capitalize(top_term)
-            }
-        }
-        "Career" => {
-            if top_term == "cv" || top_term == "resume" || top_term == "curriculum" || top_term == "vitae" || top_term == "education" || top_term == "objective" {
-                "Resume".to_string()
-            } else if top_term == "portfolio" || top_term == "projects" {
-                "Portfolio".to_string()
-            } else {
-                capitalize(top_term)
-            }
-        }
-        "Creative" => {
-            if top_term == "screenplay" || top_term == "script" {
-                "Screenplays".to_string()
-            } else if top_term == "story" || top_term == "kadha" || top_term == "horror" {
-                "Stories".to_string()
-            } else {
-                capitalize(top_term)
-            }
-        }
-        "Finance" => {
-            if top_term == "invoice" || top_term == "billing" {
-                "Invoices".to_string()
-            } else if top_term == "receipt" {
-                "Receipts".to_string()
-            } else {
-                capitalize(top_term)
-            }
-        }
-        "Media" => {
-            if matches!(ext, "mp4" | "mkv" | "avi" | "mov") {
-                "Video".to_string()
-            } else if matches!(ext, "png" | "jpg" | "jpeg" | "webp") {
-                "Visuals".to_string()
-            } else {
-                capitalize(top_term)
-            }
-        }
-        _ => capitalize(top_term),
+/// Dynamically formats a subtopic token from the top-scoring salient domain term.
+/// Acronyms (e.g. "CV", "QPS", "API", "SQL", "TAX") are uppercased;
+/// standard words are cleanly capitalized (e.g. "Invoice", "Resume", "Prescription", "Algorithm").
+pub fn format_subtopic_token(term: &str) -> String {
+    let clean = term.trim();
+    if clean.is_empty() {
+        return String::new();
+    }
+    if clean.len() <= 3 {
+        clean.to_uppercase()
+    } else {
+        capitalize(clean)
+    }
+}
+
+/// Dynamically synthesizes a refined subtopic name from dominant term and default fallback.
+/// Strictly dynamic: no hardcoded if-else ladders.
+fn synthesize_subtopic(top_term: &str, default_subtopic: &str) -> String {
+    if !top_term.is_empty() {
+        format_subtopic_token(top_term)
+    } else {
+        default_subtopic.to_string()
     }
 }
 
@@ -500,10 +472,12 @@ fn extract_salient_subject(
     for tok in raw_tokens {
         let lower = tok.to_lowercase();
         let trimmed_lower = lower.trim_end_matches(|c: char| c.is_ascii_digit());
+
         if DOC_DESCRIPTOR_WORDS.contains(&lower.as_str())
             || (!trimmed_lower.is_empty() && DOC_DESCRIPTOR_WORDS.contains(&trimmed_lower))
+            || GENERIC_DISCARD_WORDS.contains(&lower.as_str())
             || lower.chars().all(|c| c.is_ascii_digit())
-            || (lower.len() < 3 && lower != "ai" && lower != "ml" && lower != "os" && lower != "db")
+            || (lower.len() < 3 && lower != "ai" && lower != "ml" && lower != "os" && lower != "db" && lower != "cs" && lower != "it")
         {
             continue;
         }
@@ -518,10 +492,11 @@ fn extract_salient_subject(
         }
     }
 
-    // 2. Check extracted keywords excluding descriptors
+    // 2. Check extracted keywords excluding descriptors and generic words
     for kw in extracted_keywords {
         let clean = kw.trim().to_lowercase();
         if !DOC_DESCRIPTOR_WORDS.contains(&clean.as_str())
+            && !GENERIC_DISCARD_WORDS.contains(&clean.as_str())
             && clean.len() >= 4
             && !clean.contains("redacted")
             && !clean.chars().all(|c| c.is_ascii_digit())
@@ -530,12 +505,13 @@ fn extract_salient_subject(
         }
     }
 
-    // 3. Check term frequencies sorted by weight excluding descriptors
+    // 3. Check term frequencies sorted by weight excluding descriptors and generic words
     let mut terms: Vec<_> = term_freq.iter().collect();
     terms.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
     for (term, _) in terms {
         let clean = term.to_lowercase();
         if !DOC_DESCRIPTOR_WORDS.contains(&clean.as_str())
+            && !GENERIC_DISCARD_WORDS.contains(&clean.as_str())
             && clean.len() >= 4
             && !clean.chars().all(|c| c.is_ascii_digit())
         {
@@ -551,11 +527,17 @@ fn extract_salient_topic(
     term_freq: &HashMap<String, f32>,
     extracted_keywords: &[String],
     file_name: &str,
+    default_fallback: &str,
 ) -> String {
-    // 1. Check extracted keywords
-    if let Some(kw) = extracted_keywords.first() {
+    // 1. Check extracted keywords excluding generic noise
+    for kw in extracted_keywords {
         let clean = kw.trim();
-        if clean.len() >= 3 && !clean.contains("redacted") {
+        let lower = clean.to_lowercase();
+        if clean.len() >= 3
+            && !clean.contains("redacted")
+            && !GENERIC_DISCARD_WORDS.contains(&lower.as_str())
+            && !clean.chars().all(|c| c.is_ascii_digit())
+        {
             return capitalize(clean);
         }
     }
@@ -565,22 +547,30 @@ fn extract_salient_topic(
     terms.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     for (term, _) in terms {
-        if term.len() >= 4 && !term.chars().all(|c| c.is_ascii_digit()) {
+        let lower = term.to_lowercase();
+        if term.len() >= 4
+            && !term.chars().all(|c| c.is_ascii_digit())
+            && !GENERIC_DISCARD_WORDS.contains(&lower.as_str())
+        {
             return capitalize(term);
         }
     }
 
     // 3. Check filename token
     for tok in file_name.split(|c: char| !c.is_alphanumeric()) {
-        if tok.len() >= 4 && !tok.chars().all(|c| c.is_ascii_digit()) {
+        let lower = tok.to_lowercase();
+        if tok.len() >= 4
+            && !tok.chars().all(|c| c.is_ascii_digit())
+            && !GENERIC_DISCARD_WORDS.contains(&lower.as_str())
+        {
             return capitalize(tok);
         }
     }
 
-    "Reference".to_string()
+    default_fallback.to_string()
 }
 
-fn capitalize(s: &str) -> String {
+pub fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         None => String::new(),
@@ -629,5 +619,13 @@ mod tests {
             let (cat, _) = DynamicSemanticClassifier::classify(t, f, &[], "txt");
             assert_ne!(cat, "General");
         }
+    }
+
+    #[test]
+    fn test_image_never_falsely_categorized_as_academics() {
+        let file = "WhatsApp Image 2026-10-09 at 11.47.38 AM.jpeg";
+        let (cat, _) = DynamicSemanticClassifier::classify("", file, &[], "jpeg");
+        assert!(!cat.starts_with("Academics/"), "Image must not be Academics, got: {}", cat);
+        assert!(cat.starts_with("Media/"), "Image must be Media, got: {}", cat);
     }
 }
