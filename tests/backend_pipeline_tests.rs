@@ -208,3 +208,47 @@ async fn test_memory_budget_under_10mb() {
     // should remain strictly below 15MB in debug, and < 10MB in release.
     assert!(rss_after_mb < 20.0, "RSS must be strictly bounded, got {:.2} MB", rss_after_mb);
 }
+
+#[test]
+fn test_legacy_python_artifacts_purged() {
+    let legacy_paths = [
+        "ai/__init__.py",
+        "ai/embedding.py",
+        "ai/groq_client.py",
+        "axel_desktop_app.py",
+        "config.py",
+        "extractor/__init__.py",
+        "extractor/docx_reader.py",
+        "extractor/ocr.py",
+        "extractor/pdf.py",
+        "launcher.py",
+        "main.py",
+        "metadata/__init__.py",
+        "metadata/docx_meta.py",
+        "metadata/image_meta.py",
+        "metadata/pdf_meta.py",
+        "ml/classifier.py",
+        "ml/data.json",
+        "ml/generate_synthetic_data.py",
+        "ml/keywords.py",
+        "requirements.txt",
+        "run_batch.py",
+        "ui/__init__.py",
+        "ui/file_browser.py",
+        "ui/processor.py",
+        "ui/results_display.py",
+        "ui/search_widget.py",
+        "utils/__init__.py",
+        "utils/file_handler.py",
+        "utils/indexer.py",
+        "utils/watcher.py",
+        "verify_desktop_app.py",
+    ];
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for rel in &legacy_paths {
+        let p = root.join(rel);
+        assert!(!p.exists(), "Legacy file {:?} should have been purged", p);
+    }
+}
+
